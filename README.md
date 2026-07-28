@@ -37,9 +37,14 @@ DNS record Vercel shows you at it.
 ### GitHub Pages
 
 `.github/workflows/deploy-pages.yml` deploys on every push to `main` or
-`claude/website-deployment-7u69nj`. It enables Pages itself on the first run, so
-there is nothing to switch on beforehand — the live URL appears in the workflow
-summary and under **Settings → Pages**.
+`claude/website-deployment-7u69nj`. Pages has to be switched on once by hand
+first — the workflow's own token is not allowed to create the site:
+
+1. **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+2. **Actions → Deploy to GitHub Pages → Run workflow** (or just push again).
+
+The live URL — `https://b00817261-blip.github.io/PARI/` — then appears in the
+workflow summary and under Settings → Pages.
 
 Note that GitHub Pages is only free on public repos. If you make this repo
 private, Pages needs a paid plan; Vercel serves private repos on the free tier.
