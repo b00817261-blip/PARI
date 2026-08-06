@@ -52,6 +52,39 @@ private, Pages needs a paid plan; Vercel serves private repos on the free tier.
 ## Updating the data
 
 The dataset is the `const D = {...}` literal in the `<script>` block at the
-bottom of `index.html`. Replace that object with a freshly exported one, keeping
-the same shape, and push. Both hosts redeploy on push, and `index.html` is served
-`must-revalidate` so viewers pick up the new numbers without a hard refresh.
+bottom of `index.html`. `tools/build_dataset.py` rebuilds that object from the
+smartMOOV BI exports, so a refresh is a re-run rather than hand-editing JSON:
+
+```sh
+pip install pandas openpyxl
+python3 tools/build_dataset.py --src ~/exports --asof 2026-08-06 --out D.json
+```
+
+Drop all nine exports in one folder — the script finds each by a fragment of its
+filename, so the random prefix the BI tool adds does not matter:
+
+| Export | Feeds |
+| --- | --- |
+| `PO_milestone_performance` | stage strip, open-overdue queue, supplier league, CRD reasons |
+| `latest_delivery_data__pepco` | delivery punctuality, stale tracking records |
+| `demurrage__detention_tracker` | DEM+DET risk, customs backlog |
+| `booking_rejection_analysis` | booking rejections |
+| `pepco_carrier_scoring` | carrier league |
+| `carrier_performance` | ETD slip column |
+| `OHA_KPI` + `pepco_weekly_volume` | KPI bars (rates weighted by shipments) |
+| `shipping_document_verification` | doc-verification card |
+
+Then paste the contents of `D.json` over the `const D = {...}` literal and update
+the `data as of` stamp in the header. Both hosts redeploy on push, and
+`index.html` is served `must-revalidate` so viewers pick up the new numbers
+without a hard refresh.
+
+Two things the script cannot do for you:
+
+- **Allocation compliance** has no export in the current set, so the script
+  carries the previous values forward and the card is labelled with their own
+  older date. Supply a nomination/booked TEU export to make it live.
+- **The row cap.** The milestone and delivery exports come out of BI capped at
+  150,000 rows with *"some data may have been omitted"* in the footer. The script
+  reads that footer and surfaces it on the Data quality page. Raise the export
+  limit before anyone quotes these counts as totals.
