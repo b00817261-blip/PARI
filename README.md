@@ -79,6 +79,12 @@ the `data as of` stamp in the header. Both hosts redeploy on push, and
 `index.html` is served `must-revalidate` so viewers pick up the new numbers
 without a hard refresh.
 
+The script also measures the definitions it applied — window widths, due-date
+coverage, and how well each stage's own dates reproduce the segment the export
+assigns — and writes them into `D.defs`, which renders as the **Definitions**
+page. That page is generated, not hand-written, so it always describes the
+refresh currently deployed.
+
 Two things the script cannot do for you:
 
 - **Allocation compliance** has no export in the current set, so the script

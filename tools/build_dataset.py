@@ -371,6 +371,123 @@ D['allocation_raw'] = old['allocation_raw']
 notes.append('Allocation compliance carried over from the 2026-07-24 extract — no nomination/booking '
              'export was supplied in this refresh.')
 
+# --------------------------------------------------------------- definitions
+# Measured from the exports rather than asserted, so the page always states the
+# window this particular refresh actually covers.
+_vd_due = pd.to_datetime(mile['Vessel Departure Due Date'], errors='coerce')
+stage_defs = []
+for stage, segc, duec, ovdc in STAGES:
+    donec = duec.replace('Due Date', 'Done Date')
+    urgc = duec.replace('Due Date', 'Urgent Date')
+    done = pd.to_datetime(mile[donec], errors='coerce')
+    due = pd.to_datetime(mile[duec], errors='coerce')
+    urg = pd.to_datetime(mile[urgc], errors='coerce')
+    seg = mile[segc]
+    full = done.notna() & due.notna() & urg.notna()
+    predicted = pd.Series(pd.NA, index=mile.index, dtype='object')
+    predicted[done <= urg] = 'DONE IN POSSIBLE'
+    predicted[(done > urg) & (done <= due)] = 'DONE IN URGENT'
+    predicted[done > due] = 'DONE IN OVERDUE'
+    match = round(100 * (predicted[full] == seg[full]).mean(), 1) if full.any() else None
+    anchor = (due - _vd_due).dt.days.median()
+    stage_defs.append({
+        'Stage': stage,
+        'Urgent → due': f'{(due - urg).dt.days.median():.0f}d' if due.notna().any() else '—',
+        'Due date set at': ('T' + format(int(anchor), '+d')) if pd.notna(anchor) else '—',
+        'Has a due date': f'{round(100 * due.notna().mean())}%',
+        'Dates reproduce segment': f'{match}%' if match is not None else '—',
+    })
+
+_wk = f"{mile['ATD Week'].min()} → {mile['ATD Week'].max()}"
+_w0 = (TODAY - pd.Timedelta(days=30)).strftime('%d %b')
+_w1 = TODAY.strftime('%d %b %Y')
+_rej_t = pd.to_datetime(rej['Event Time'], errors='coerce')
+_doc_t = pd.to_datetime(doc['Create Time(CET)'], errors='coerce')
+_free = sorted(dem['DEM+DET Contract'].dropna().unique())
+
+D['defs'] = {
+    'as_of': TODAY.strftime('%Y-%m-%d'),
+    'stage_rule': (
+        'Every origin milestone carries three dates: an urgent date, a due date, and the date it was '
+        'actually done. The export grades each one into a segment — done on or before the urgent date is '
+        'DONE IN POSSIBLE, done between the urgent and due dates is DONE IN URGENT, done after the due '
+        'date is DONE IN OVERDUE. The dashboard counts only DONE IN POSSIBLE as on time, so the urgent '
+        'date — not the due date — is the real deadline.'),
+    'done_rule': (
+        'Done means the milestone carries a segment, whatever that segment is. Open overdue means it '
+        f'carries none and its due date has already passed as of {TODAY.strftime("%d %b %Y")} — that is the '
+        'actionable queue. A milestone that is not done but is not yet due counts in neither column.'),
+    'stages': stage_defs,
+    'cards': [
+        {'Figure': 'Stage strip · on time',
+         'Population': f'{len(mile):,} PO milestones, ATD weeks {_wk}',
+         'Counted as good': 'segment is DONE IN POSSIBLE',
+         'Window': 'whole extract, not a rolling window'},
+        {'Figure': 'Open overdue queue',
+         'Population': 'same milestones',
+         'Counted as good': 'n/a — counts milestones with no segment and a due date in the past',
+         'Window': f'as of {TODAY.strftime("%d %b %Y")}'},
+        {'Figure': 'KPI bars',
+         'Population': 'OHA KPI rates × PEPCO weekly shipment counts, per origin',
+         'Counted as good': 'the client-reported on-time rate for that step',
+         'Window': f'{recent[-1]} → {recent[0]} (8 complete ATD weeks)'},
+        {'Figure': 'Doc verification',
+         'Population': f"{D['docver']['checks']:,} document checks with a verdict",
+         'Counted as good': "Status is Complete; Incomplete carries a V-code reason group",
+         'Window': f"{_doc_t.min():%d %b %Y} → {_doc_t.max():%d %b %Y}"},
+        {'Figure': 'Supplier league / CRD reasons',
+         'Population': f"{len(crd):,} orders carrying a coded cargo-ready reason",
+         'Counted as good': 'n/a — ranks by open overdue count and by coded reason',
+         'Window': f'ATD weeks {_wk}'},
+        {'Figure': 'Carrier league',
+         'Population': 'PEPCO carrier scoring, one row per carrier per month',
+         'Counted as good': 'on-time and speed are 0–10 scores set by the scoring model, not rates',
+         'Window': f"{D['carriers']['month']} — the last complete month"},
+        {'Figure': 'ETD slip',
+         'Population': f'{len(perf):,} carrier bookings',
+         'Counted as good': 'median days between booked ETD and actual departure',
+         'Window': 'whole carrier-performance extract'},
+        {'Figure': 'Booking rejections',
+         'Population': f'{len(rej):,} rejection events',
+         'Counted as good': 'n/a — every rejection is counted once',
+         'Window': f'{_rej_t.min():%d %b %Y} → {_rej_t.max():%d %b %Y}'},
+        {'Figure': 'DEM+DET risk',
+         'Population': f'{len(dem):,} containers in the tracker',
+         'Counted as good': f'at risk = storage beyond the contractual free time '
+                            f'({"/".join(str(int(f)) for f in _free)} days); risk is the excess in days',
+         'Window': 'open containers as of the extract'},
+        {'Figure': 'Delivery punctuality',
+         'Population': f"{D['delivery']['n_30d']:,} orders that arrived in the window",
+         'Counted as good': 'actual arrival on or before the required in-DC date',
+         'Window': f'{_w0} → {_w1} (30 days)'},
+        {'Figure': 'Customs backlog',
+         'Population': 'containers landed at POD',
+         'Counted as good': 'n/a — counts those still sitting in the POD terminal',
+         'Window': f'landed {_w0} → {_w1} (30 days)'},
+        {'Figure': 'Stale tracking',
+         'Population': 'client delivery orders',
+         'Counted as good': 'n/a — counts orders past their required in-DC date with no arrival recorded',
+         'Window': f'as of {TODAY.strftime("%d %b %Y")}'},
+    ],
+    'caveats': [
+        f'<b>Shipping docs is not its own measurement.</b> It carries its own done, due and urgent dates, '
+        f'but the segment the export assigns matches the Loading plan segment on '
+        f'{round(100 * (mile["Upload Shipping Documents Done Segment"].astype(str) == mile["Container Loading Plan Done Segment"].astype(str)).mean(), 1)}% of rows, '
+        f'while its own dates reproduce it on almost none. That is why the two rows show identical '
+        f'percentages. Treat the Shipping docs row as a copy of Loading plan until the source is fixed.',
+        '<b>Later stages cannot be re-derived from the export.</b> The urgent/due/done rule reproduces the '
+        'stated segment almost perfectly for Cargo ready and Dimensions, and progressively less well down '
+        'the pipeline. Where the reproduction rate is low the segment is computed upstream against dates '
+        'this export does not carry, so it has to be taken on trust.',
+        '<b>Due dates are frequently absent.</b> SO release carries one on under 2% of orders and Dimensions '
+        'on around a quarter, so their windows are set for only a fraction of the book.',
+        '<b>The two order-level exports are capped at 150,000 rows</b> with a truncation warning in the '
+        'footer, so every population above is that capped extract rather than the full book.',
+        '<b>Allocation compliance is from the 2026-07-24 extract.</b> No nomination file came with this '
+        'refresh, so it is the one card not as of the header date.',
+    ],
+}
+
 json.dump(clean(D), open(OUT, 'w'), separators=(',', ':'), ensure_ascii=False)
 
 print('=== rebuilt ===')
