@@ -80,6 +80,110 @@ if (D.perf.asof === D.defs.as_of) {
 });
 """
 
+FOCUS_JS = r'''
+// ---- drill-down -----------------------------------------------------------
+// Clicking a country has to answer "what is urgent here", not hand over a
+// table. Everything below is computed live from the queue rows already in the
+// page, so the focus panel can be narrowed by origin, stage, supplier or state
+// without another dataset.
+let focus = {origin:null, stage:null, supplier:null, state:null};
+function focusRows(){
+  return (RAWS.queue||[]).filter(r =>
+    (!focus.origin   || r.Origin   === focus.origin) &&
+    (!focus.stage    || r.Stage    === focus.stage) &&
+    (!focus.supplier || r.Supplier === focus.supplier) &&
+    (!focus.state    || r.State    === focus.state));
+}
+function tally(rows, key){
+  const m = new Map();
+  rows.forEach(r => { const k = r[key];
+    const e = m.get(k) || {k, overdue:0, urgent:0, worst:0};
+    if (r.State === 'Overdue'){ e.overdue++; e.worst = Math.max(e.worst, r['Days overdue']||0); }
+    else e.urgent++;
+    m.set(k, e); });
+  return [...m.values()].sort((a,b) => (b.overdue+b.urgent) - (a.overdue+a.urgent));
+}
+function focusList(rows, key, kind, limit){
+  const t = tally(rows, key).slice(0, limit), mx = Math.max(1, ...t.map(x => x.overdue + x.urgent));
+  if (!t.length) return '<div class="note">Nothing open here.</div>';
+  return t.map(x => `<div class="bar-row focus-go" data-kind="${kind}" data-val="${String(x.k).replace(/"/g,'&quot;')}" style="cursor:pointer">
+      <div class="bar-lab" style="width:${kind==='supplier'?200:130}px;font-size:12.5px;color:var(--sea)">${x.k} →</div>
+      <div class="bar-track" style="display:flex">
+        <div style="width:${(x.overdue/mx*100).toFixed(1)}%;background:var(--rust)"></div>
+        <div style="width:${(x.urgent/mx*100).toFixed(1)}%;background:var(--amber-bar)"></div>
+      </div>
+      <div class="bar-val" style="width:150px;font-size:12px;white-space:nowrap">${fmt(x.overdue)} od${x.urgent?' · '+fmt(x.urgent)+' urg':''}</div>
+    </div>`).join('');
+}
+function crumb(label, kind){
+  return `<button class="chip on focus-clear" data-kind="${kind}" style="margin-right:6px">${label} ×</button>`;
+}
+function renderFocus(){
+  const box = document.getElementById('act-focus');
+  if (!focus.origin && !focus.stage && !focus.supplier && !focus.state){ box.style.display = 'none'; return; }
+  const rows = focusRows();
+  const od = rows.filter(r => r.State === 'Overdue');
+  const ur = rows.filter(r => r.State === 'Urgent');
+  const days = od.map(r => r['Days overdue']||0).sort((a,b) => a-b);
+  const med = days.length ? days[Math.floor(days.length/2)] : 0;
+  const orders = new Set(rows.map(r => r.Order)).size;
+  const worst = [...od].sort((a,b) => (b['Days overdue']||0) - (a['Days overdue']||0)).slice(0, 8);
+  const soon  = [...ur].sort((a,b) => (a['Days to due']||0) - (b['Days to due']||0)).slice(0, 8);
+  const show  = worst.length ? worst : soon;
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div style="margin-bottom:10px">
+      ${focus.origin   ? crumb(focus.origin, 'origin') : ''}
+      ${focus.stage    ? crumb(focus.stage, 'stage') : ''}
+      ${focus.supplier ? crumb(focus.supplier, 'supplier') : ''}
+      ${focus.state    ? crumb(focus.state, 'state') : ''}
+      <button class="chip focus-clear" data-kind="all">clear all</button>
+    </div>
+    <div class="headline" style="margin-bottom:10px">
+      <div class="bignum" style="color:var(--rust)">${fmt(rows.length)}</div>
+      <div class="hmeta">open items across <b>${fmt(orders)}</b> orders<br>
+        <span class="mono">${fmt(od.length)} overdue · ${fmt(ur.length)} urgent${od.length?` · median ${med}d late, worst ${days[days.length-1]}d`:''}</span></div>
+      <div style="margin-left:auto;align-self:center">
+        <button class="chip focus-state" data-val="Overdue"${focus.state==='Overdue'?' style="border-color:var(--rust);color:var(--rust)"':''}>only overdue</button>
+        <button class="chip focus-state" data-val="Urgent"${focus.state==='Urgent'?' style="border-color:var(--amber);color:var(--amber)"':''}>only urgent</button>
+      </div>
+    </div>
+    <div class="grid2">
+      <div><div class="lvl" style="margin-top:6px">Where it is stuck</div>${focusList(rows,'Stage','stage',9)}</div>
+      <div><div class="lvl" style="margin-top:6px">Who is behind it</div>${focusList(rows,'Supplier','supplier',8)}</div>
+    </div>
+    <div class="lvl" style="margin:18px 0 8px">${worst.length?'Worst right now':'Closest to breaching'}</div>
+    <div class="hgrid"><table><thead><tr><th>Order</th><th>Supplier</th><th>Stage</th><th>Due</th><th class="num">${worst.length?'Days overdue':'Days to due'}</th></tr></thead><tbody>
+      ${show.map(r => `<tr><td class="mono" style="font-size:12px">${r.Order}</td><td style="font-size:12.5px">${r.Supplier}</td>
+        <td style="font-size:12.5px">${r.Stage}</td><td class="mono" style="font-size:12px">${r.Due}</td>
+        <td class="num" style="color:${worst.length?'var(--bad)':'var(--amber)'};font-weight:600">${worst.length?r['Days overdue']+'d':r['Days to due']+'d'}</td></tr>`).join('')}
+    </tbody></table></div>
+    <button class="rawbtn" id="focus-all">View all ${fmt(rows.length)} rows in the raw table</button>`;
+
+  box.querySelectorAll('.focus-go').forEach(el => el.onclick = () => {
+    focus[el.dataset.kind] = el.dataset.val; renderFocus(); });
+  box.querySelectorAll('.focus-clear').forEach(el => el.onclick = () => {
+    if (el.dataset.kind === 'all') focus = {origin:null, stage:null, supplier:null, state:null};
+    else focus[el.dataset.kind] = null;
+    if (!focus.origin) { org = 'ALL'; renderStrip(); }
+    renderFocus(); });
+  box.querySelectorAll('.focus-state').forEach(el => el.onclick = () => {
+    focus.state = focus.state === el.dataset.val ? null : el.dataset.val; renderFocus(); });
+  document.getElementById('focus-all').onclick = () => {
+    const p = document.getElementById('raw-queue');
+    if (!p._mounted) { mountRaw(p, RAWS.queue, 'queue'); p._mounted = true; }
+    p.style.display = 'block';
+    [['Origin', focus.origin], ['Stage', focus.stage], ['State', focus.state]].forEach(([c, v]) => {
+      const s = p.querySelector('select[data-fc="' + c + '"]');
+      if (s) { s.value = v || ''; s.dispatchEvent(new Event('change')); }
+    });
+    p.scrollIntoView({behavior:'smooth', block:'nearest'});
+  };
+  box.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+'''
+
+
 def section(html, sid):
     m = re.search(r'(<section class="page[^"]*" id="p-%s">.*?</section>)' % sid, html, re.S)
     if not m:
@@ -140,6 +244,7 @@ ACTION_CARD = """  <div class="card attn" id="act-card">
     <div id="act-origins"></div>
     <div class="lvl" style="margin:18px 0 8px">By stage</div>
     <div id="act-stages"></div>
+    <div id="act-focus" style="display:none;margin-top:22px;padding-top:18px;border-top:2px solid var(--line)"></div>
     <div class="note">Overdue = past its due date and still not done. Urgent = past the urgent date but not yet due, so it is the last chance to act before it breaches. Both are chaseable today; everything else is either done or not yet due.</div>
     <div class="rawwrap" id="raw-queue"></div>
   </div>
@@ -196,7 +301,7 @@ out = out.replace('\n</main>', '\n' + '\n\n'.join([pipe, carr, dq, defs]) + '\n\
 
 # ---------------------------------------------------------------------- JS
 # module-level state the internal renderers close over
-fns = "let org='ALL';\n"
+fns = "let org='ALL';\n" + FOCUS_JS
 fns += '\n'.join(func(IJS, n) for n in
                 ['tableFrom', 'renderStrip', 'renderKpi', 'renderDoc', 'renderCarr', 'renderDq', 'renderDefs'])
 
@@ -224,18 +329,17 @@ function renderAction(){
     ' urgent \u2014 past the urgent date, not yet past due</span>';
   document.getElementById('act-raw').textContent = 'View raw data \u00b7 ' + fmt(A.overdue + A.urgent) + ' items';
   document.getElementById('act-origins').innerHTML = actBars(A.by_origin, 'origin', true);
-  document.getElementById('act-stages').innerHTML = actBars(A.by_stage, 'stage', false);
+  document.getElementById('act-stages').innerHTML = actBars(A.by_stage, 'stage', true);
+  document.querySelectorAll('#act-stages .act-click').forEach(el => el.onclick = () => {
+    focus = {origin: null, stage: el.dataset.go, supplier: null, state: null};
+    renderFocus();
+  });
   // clicking a country filters the stage strip to it, opens the drill-down
   // already filtered to that origin, and scrolls the two together
   document.querySelectorAll('#act-origins .act-click').forEach(el => el.onclick = () => {
-    const o = el.dataset.go;
-    org = o; renderStrip();
-    const panel = document.getElementById('raw-queue');
-    if (!panel._mounted) { mountRaw(panel, RAWS.queue, 'queue'); panel._mounted = true; }
-    panel.style.display = 'block';
-    const sel = panel.querySelector('select[data-fc="Origin"]');
-    if (sel) { sel.value = o; sel.dispatchEvent(new Event('change')); }
-    document.getElementById('act-card').scrollIntoView({behavior: 'smooth', block: 'start'});
+    org = el.dataset.go; renderStrip();
+    focus = {origin: el.dataset.go, stage: null, supplier: null, state: null};
+    renderFocus();
   });
 }
 function renderLeague(){
