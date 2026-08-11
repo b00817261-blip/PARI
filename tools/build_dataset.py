@@ -160,7 +160,7 @@ D['sup_league'] = [{'Supplier': s, 'Open overdue': int(r.n),
 # cargo-ready-date misses, by coded reason
 crd = mile[mile['Cargo Ready Date Reason'].notna()].copy()
 crd['_days'] = pd.to_numeric(crd['CRD Overdue Days'], errors='coerce').fillna(0)
-D['crd_top'] = {k: int(v) for k, v in crd['Cargo Ready Date Reason'].value_counts().head(8).items()}
+
 
 
 def owner(reason):
@@ -171,10 +171,7 @@ def owner(reason):
 
 
 crd['_own'] = crd['Cargo Ready Date Reason'].map(owner)
-D['crd_split'] = {k: int(v) for k, v in crd['_own'].value_counts().items() if k != 'Other'}
-D['crd_raw'] = [{'Order': r['Order Number'], 'Supplier': r['Supplier Name'],
-                 'Coded reason': r['Cargo Ready Date Reason'], 'Days overdue': int(r['_days'])}
-                for _, r in crd.sort_values('_days', ascending=False).head(CAP).iterrows()]
+
 
 # ------------------------------------------------------------------- KPI set
 kpi_raw = pd.read_excel(F_KPI, engine='openpyxl', header=None)
@@ -277,12 +274,7 @@ _pod = pd.to_datetime(dem['POD Arrival'], errors='coerce')
 held = dem[(_pod >= TODAY - pd.Timedelta(days=30)) & (_pod <= TODAY)
            & (dem['Container Location'] == 'In POD terminal')].copy()
 held['_days'] = (TODAY - pd.to_datetime(held['POD Arrival'], errors='coerce')).dt.days
-D['customs'] = {'total': int(len(held)),
-                'by_dc': {k: int(v) for k, v in held['DC'].value_counts().head(6).items()}}
-D['customs_raw'] = [{'Container': r['Container #'], 'MBL': r['MBL'], 'DC': r['DC'],
-                     'Arrived': dstr(r['POD Arrival']), 'Days held': int(r['_days']),
-                     'Reason': 'Not yet coded'}
-                    for _, r in held.sort_values('_days', ascending=False).head(CAP).iterrows()]
+
 
 # ---------------------------------------------------- delivery punctuality
 dl, trunc_d = load(F_DELIV)
@@ -295,13 +287,9 @@ win = dl[(dl['_ata'] >= TODAY - pd.Timedelta(days=30)) & (dl['_ata'] <= TODAY)].
 win['_ok'] = win['_ata'] <= win['_indc']
 by_site = win.groupby('_site')['_ok'].agg(['size', 'mean'])
 by_site = by_site[by_site['size'] >= 20]
-D['delivery'] = {'pct_30d': round(100 * win['_ok'].mean(), 1), 'n_30d': int(len(win)),
-                 'by_dc': {k: round(100 * r['mean'], 1) for k, r in by_site.iterrows()}}
-D['delivery_raw'] = [{'Order': r['Order Number'], 'DC': r['_site'],
-                      'MOT': r['Shipping Type'], 'Required in DC': dstr(r['_indc']),
-                      'Arrived': dstr(r['_ata']),
-                      'Status': 'On schedule' if r['_ok'] else 'Late'}
-                     for _, r in win.sort_values('_ok').head(CAP).iterrows()]
+# Delivery punctuality, customs holds and coded CRD reasons are not emitted here:
+# the client report owns those figures on pages 01-06 and states them better. The
+# computations survive only where the data-quality metrics below depend on them.
 
 # ------------------------------------------------------------- data quality
 stale = dl[(dl['_indc'] < TODAY) & dl['_ata'].isna()].copy()
@@ -362,12 +350,58 @@ D['stale_raw'] = [{'Order': r['Order Number'], 'DC': r['_site'],
                    'Days past required': int(r['_past'])}
                   for _, r in stale.sort_values('_past', ascending=False).head(CAP).iterrows()]
 
+# The page also carries the Pepco client report on pages 01-06, built from a
+# different set of exports and not regenerated here. Describe those figures too,
+# quoting that report's own scope notes, so the Definitions page covers the whole
+# page rather than just the half this script owns.
+def extend_defs_for_client(dd, client):
+    dd['cards'] = [
+        {'Figure': 'Delivery performance (weekly)',
+         'Population': f"{client['perf']['population']:,} orders, S01 approved changes excluded "
+                       f"({client['perf']['s01_excluded']:,})",
+         'Counted as good': 'arrival on or before the required in-DC date (strict); +3 and +7 day '
+                            'variants shown alongside',
+         'Window': f"week of {client['daily']['week']['label']}, with a 13-week series behind it"},
+        {'Figure': 'Needs attention / Due at DC',
+         'Population': 'orders whose required in-DC date falls in the next 3 or 7 days',
+         'Counted as good': 'on track = current final ETA on or before the required in-DC date',
+         'Window': 'next 3 / 7 days from the client as-of date'},
+        {'Figure': 'Arrivals this week',
+         'Population': 'containers with an ETA or actual arrival in the current week',
+         'Counted as good': 'arrived; overdue = ETA passed with no arrival recorded',
+         'Window': 'current ISO week'},
+        {'Figure': 'Transshipment waiting',
+         'Population': 'containers at a transit port with no onward departure',
+         'Counted as good': 'n/a — counts those waiting, and how long',
+         'Window': 'open containers as of the extract'},
+        {'Figure': 'Customs held',
+         'Population': 'containers arrived without clearance finished',
+         'Counted as good': 'n/a — counts held containers by recorded cause',
+         'Window': 'selectable: last 7 / 30 / 90 days'},
+        {'Figure': 'Monthly trends',
+         'Population': 'arrived volume and on-time by month',
+         'Counted as good': 'strict and +7-day definitions shown together',
+         'Window': 'rolling extract; first and last months are partial'},
+    ] + dd['cards']
+    dd['caveats'] = [
+        '<b>This page is two extracts stitched together.</b> Pages 01\u201306 come from the client '
+        f"report build ({client['perf']['asof']}) and pages 07\u201310 from the internal build "
+        f"({dd['as_of']}). Figures across the two halves are a day apart and will not reconcile "
+        'exactly. Refreshing the client half needs its own set of exports.',
+        '<b>Each figure appears once.</b> Delivery performance, customs holds and cargo-ready reasons '
+        'are the client report\u2019s versions throughout \u2014 they carry definitions, windows and '
+        'causes the internal extracts do not. The internal duplicates were removed rather than shown '
+        'twice.',
+    ] + dd['caveats']
+
+
 # -------------------------------------------------- allocation (no new export)
 INDEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'index.html')
 old = json.loads(re.search(r'const D = (\{.*?\});\n',
                            open(INDEX, encoding='utf-8').read(), re.S).group(1))
 D['allocation'] = old['allocation']
-D['allocation_raw'] = old['allocation_raw']
+# after the client-report merge this table lives in the shared raw registry
+D['allocation_raw'] = old.get('allocation_raw') or old['raw']['allocation']
 notes.append('Allocation compliance carried over from the 2026-07-24 extract — no nomination/booking '
              'export was supplied in this refresh.')
 
@@ -435,9 +469,9 @@ D['defs'] = {
          'Population': f"{D['docver']['checks']:,} document checks with a verdict",
          'Counted as good': "Status is Complete; Incomplete carries a V-code reason group",
          'Window': f"{_doc_t.min():%d %b %Y} → {_doc_t.max():%d %b %Y}"},
-        {'Figure': 'Supplier league / CRD reasons',
-         'Population': f"{len(crd):,} orders carrying a coded cargo-ready reason",
-         'Counted as good': 'n/a — ranks by open overdue count and by coded reason',
+        {'Figure': 'Supplier league',
+         'Population': 'suppliers appearing in the open-overdue milestone queue',
+         'Counted as good': 'n/a — ranks by how many overdue milestones each supplier is sitting on',
          'Window': f'ATD weeks {_wk}'},
         {'Figure': 'Carrier league',
          'Population': 'PEPCO carrier scoring, one row per carrier per month',
@@ -456,14 +490,6 @@ D['defs'] = {
          'Counted as good': f'at risk = storage beyond the contractual free time '
                             f'({"/".join(str(int(f)) for f in _free)} days); risk is the excess in days',
          'Window': 'open containers as of the extract'},
-        {'Figure': 'Delivery punctuality',
-         'Population': f"{D['delivery']['n_30d']:,} orders that arrived in the window",
-         'Counted as good': 'actual arrival on or before the required in-DC date',
-         'Window': f'{_w0} → {_w1} (30 days)'},
-        {'Figure': 'Customs backlog',
-         'Population': 'containers landed at POD',
-         'Counted as good': 'n/a — counts those still sitting in the POD terminal',
-         'Window': f'landed {_w0} → {_w1} (30 days)'},
         {'Figure': 'Stale tracking',
          'Population': 'client delivery orders',
          'Counted as good': 'n/a — counts orders past their required in-DC date with no arrival recorded',
@@ -488,18 +514,29 @@ D['defs'] = {
     ],
 }
 
-json.dump(clean(D), open(OUT, 'w'), separators=(',', ':'), ensure_ascii=False)
+# The page is two extracts stitched together: pages 01-06 come from the client
+# report build and are NOT regenerated here. Merge into whatever is already in
+# index.html so a refresh of the internal half leaves the client half standing.
+RAWMAP = {'queue': 'queue_raw', 'carriers_all': 'carriers_raw', 'allocation': 'allocation_raw',
+          'rejections': 'rejections_raw', 'demurrage': 'demurrage_raw', 'stale': 'stale_raw',
+          'docver': 'docver_raw'}
+raws = {rk: D.pop(dk) for rk, dk in RAWMAP.items()}
+raws['kpi_steps'] = D['kpi']
+D['raw'] = {**old.get('raw', {}), **raws}
+if 'perf' in old:
+    extend_defs_for_client(D['defs'], old)
+merged = {**old, **D}
+json.dump(clean(merged), open(OUT, 'w'), separators=(',', ':'), ensure_ascii=False)
 
 print('=== rebuilt ===')
-for k in old:
-    o, n = old[k], D.get(k)
+for k in sorted(set(old) | set(D)):
+    o, n = old.get(k), D.get(k)
     f = lambda v: (f'{len(v)} rows' if isinstance(v, list) else
                    (json.dumps(v)[:66] if not isinstance(v, dict) else f'{len(v)} keys'))
     print(f'  {k:16s} old={f(o):26s} new={f(n)}')
 print('\n=== notes ===')
 for n in notes:
     print('  *', n)
-print('\ndelivery', json.dumps(D['delivery']))
 print('demurrage', json.dumps({k: v for k, v in D['demurrage'].items() if k != 'by_dc'}))
 print('rejections', json.dumps(D['rejections'])[:300])
 print('dq counts', D['dq']['stale_tracking'], D['dq']['stale_oldest'], D['dq']['stale_recent_eta'])
