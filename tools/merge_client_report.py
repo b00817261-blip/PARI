@@ -126,6 +126,29 @@ pipe = pipe.replace(
 league = re.search(r'(<div class="card">\s*<div class="lvl">Supplier league.*?</div>\s*</div>)', origin, re.S).group(1)
 pipe = pipe.replace('  <div class="method">', '  ' + league + '\n  <div class="method">')
 
+# The headline number has to lead somewhere: overdue and urgent side by side,
+# split by origin, with each row clicking through to the filtered detail.
+ACTION_CARD = """  <div class="card attn" id="act-card">
+    <div class="lvl">Action queue \u00b7 open right now</div>
+    <div class="headline" style="margin-bottom:4px">
+      <div class="big" style="font-size:44px;color:var(--rust)" id="act-od"></div>
+      <div class="hmeta" id="act-sub"></div>
+      <button class="rawbtn solid" data-raw="queue" id="act-raw"
+              style="margin:0 0 0 auto;align-self:center">View raw data</button>
+    </div>
+    <div class="lvl" style="margin:16px 0 8px">By origin \u2014 click a country to jump to its detail</div>
+    <div id="act-origins"></div>
+    <div class="lvl" style="margin:18px 0 8px">By stage</div>
+    <div id="act-stages"></div>
+    <div class="note">Overdue = past its due date and still not done. Urgent = past the urgent date but not yet due, so it is the last chance to act before it breaches. Both are chaseable today; everything else is either done or not yet due.</div>
+    <div class="rawwrap" id="raw-queue"></div>
+  </div>
+"""
+pipe = pipe.replace('  <div class="card hgrid">', ACTION_CARD + '  <div class="card hgrid">', 1)
+# the strip already has its own copy of this drill-down further down the page
+pipe = pipe.replace('<button class="rawbtn" data-raw="queue">View raw data \u00b7 open overdue queue</button>', '')
+pipe = pipe.replace('<div class="rawwrap" id="raw-queue"></div>', '', 1)
+
 # Demurrage is a third place cargo stalls, so it joins the client's Watch list.
 dem_card = re.search(r'(<div class="card" style="border-left:4px solid var\(--rust\).*?id="raw-demurrage"></div>\s*</div>)', dest, re.S).group(1)
 dem_card = dem_card.replace('style="border-left:4px solid var(--rust);border-radius:0 9px 9px 0"',
@@ -179,6 +202,42 @@ fns += '\n'.join(func(IJS, n) for n in
 
 # renderOrigin drops its CRD half; renderDest keeps only demurrage
 fns += '''
+function actBars(rows, key, click){
+  const mx = Math.max(1, ...rows.map(r => r.overdue + r.urgent));
+  return rows.map(r => {
+    const tot = r.overdue + r.urgent;
+    return `<div class="bar-row${click ? ' act-click' : ''}"${click ? ` data-go="${r[key]}" style="cursor:pointer"` : ''}>
+      <div class="bar-lab" style="width:150px${click ? ';color:var(--sea);font-weight:600' : ''}">${r[key]}${click ? ' \u2192' : ''}</div>
+      <div class="bar-track" style="display:flex">
+        <div style="width:${(r.overdue / mx * 100).toFixed(1)}%;background:var(--rust)"></div>
+        <div style="width:${(r.urgent / mx * 100).toFixed(1)}%;background:var(--amber-bar)"></div>
+      </div>
+      <div class="bar-val" style="width:212px;font-size:12px;white-space:nowrap">${fmt(r.overdue)} overdue${r.urgent ? ' \u00b7 ' + fmt(r.urgent) + ' urgent' : ''}</div>
+    </div>`;
+  }).join('');
+}
+function renderAction(){
+  const A = D.action;
+  document.getElementById('act-od').textContent = fmt(A.overdue);
+  document.getElementById('act-sub').innerHTML =
+    'milestones overdue right now<br><span class="mono">plus ' + fmt(A.urgent) +
+    ' urgent \u2014 past the urgent date, not yet past due</span>';
+  document.getElementById('act-raw').textContent = 'View raw data \u00b7 ' + fmt(A.overdue + A.urgent) + ' items';
+  document.getElementById('act-origins').innerHTML = actBars(A.by_origin, 'origin', true);
+  document.getElementById('act-stages').innerHTML = actBars(A.by_stage, 'stage', false);
+  // clicking a country filters the stage strip to it, opens the drill-down
+  // already filtered to that origin, and scrolls the two together
+  document.querySelectorAll('#act-origins .act-click').forEach(el => el.onclick = () => {
+    const o = el.dataset.go;
+    org = o; renderStrip();
+    const panel = document.getElementById('raw-queue');
+    if (!panel._mounted) { mountRaw(panel, RAWS.queue, 'queue'); panel._mounted = true; }
+    panel.style.display = 'block';
+    const sel = panel.querySelector('select[data-fc="Origin"]');
+    if (sel) { sel.value = o; sel.dispatchEvent(new Event('change')); }
+    document.getElementById('act-card').scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+}
 function renderLeague(){
   document.getElementById('lg-body').innerHTML=D.sup_league.map(r=>
     `<tr><td>${r.Supplier}</td><td class="num" style="color:var(--bad);font-weight:600">${r['Open overdue']}</td><td>${r['Worst stage']}</td><td class="num">${r['Max days']}d</td></tr>`).join('');
@@ -204,9 +263,19 @@ boot_new = (fns +
             "\nObject.assign(RAWSRC, " + json.dumps(RAWSRC_ADD) + ");\n" +
             boot_old.replace('bindRaw();',
                              'renderStrip(); renderKpi(); renderDoc(); renderLeague(); '
-                             'renderCarr(); renderDem(); renderDq(); renderDefs(); bindRaw();') +
+                             'renderAction(); renderCarr(); renderDem(); renderDq(); renderDefs(); bindRaw();') +
             HEADER_AND_STALE_JS)
 out = out.replace(boot_old, boot_new)
+
+# renderStrip only exists once the internal functions are in, so widen it here
+out = out.replace(
+    "<th class=\"num\">Open overdue</th><th class=\"num\">Med days</th>",
+    "<th class=\"num\">Open overdue</th><th class=\"num\">Urgent</th><th class=\"num\">Med days</th>")
+out = out.replace(
+    '''<td class="num">${r.open_overdue?r.med_days+'d':'\u00b7'}</td>''',
+    '''<td class="num" style="color:${r.urgent?'var(--amber)':'var(--ink-3)'};font-weight:${r.urgent?600:400}">${r.urgent||'\u00b7'}</td>
+     <td class="num">${r.open_overdue?r.med_days+'d':'\u00b7'}</td>''')
+
 
 # internal buttons point at the client registry keys
 for old, new in [('data-raw="queue"', 'data-raw="queue"'), ('data-raw="queue2"', 'data-raw="queue"'),

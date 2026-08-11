@@ -106,14 +106,21 @@ if trunc:
                  f'(weeks {mile["ATD Week"].min()} to {mile["ATD Week"].max()}).')
 mile['_origin'] = mile['Origin Location'].fillna('??')
 
-due_cache, open_cache = {}, {}
+# Two actionable states, both meaning "not done yet":
+#   overdue - the due date has passed
+#   urgent  - past the urgent date but not yet past the due date, i.e. the last
+#             chance to act before it breaches
+due_cache, urg_cache, open_cache, urgent_cache = {}, {}, {}, {}
 for stage, segc, duec, ovdc in STAGES:
     due_cache[stage] = pd.to_datetime(mile[duec], errors='coerce')
+    urg_cache[stage] = pd.to_datetime(mile[duec.replace('Due Date', 'Urgent Date')], errors='coerce')
     open_cache[stage] = mile[segc].isna() & (due_cache[stage] < TODAY)
+    urgent_cache[stage] = (mile[segc].isna() & (urg_cache[stage] <= TODAY)
+                           & (due_cache[stage] >= TODAY))
 
 origins = ['ALL'] + sorted(mile['_origin'].value_counts().loc[lambda s: s >= 50].index.tolist())
 strip = {}
-queue_rows = []
+queue_rows, urgent_rows = [], []
 for org in origins:
     sel = slice(None) if org == 'ALL' else (mile['_origin'] == org)
     sub = mile if org == 'ALL' else mile[sel]
@@ -124,6 +131,7 @@ for org in origins:
         ontime = round(100 * (seg == 'DONE IN POSSIBLE').sum() / done, 1) if done else 0.0
         late = round(100 * (seg == 'DONE IN OVERDUE').sum() / done, 1) if done else 0.0
         om = open_cache[stage] if org == 'ALL' else (open_cache[stage] & sel)
+        um = urgent_cache[stage] if org == 'ALL' else (urgent_cache[stage] & sel)
         openq = mile[om]
         days = (TODAY - due_cache[stage][om]).dt.days
         if len(openq):
@@ -132,21 +140,50 @@ for org in origins:
         else:
             wsup, wn = '—', 0
         rows.append({'stage': stage, 'done': done, 'ontime': ontime, 'late_done': late,
-                     'open_overdue': int(len(openq)),
+                     'open_overdue': int(len(openq)), 'urgent': int(um.sum()),
                      'med_days': int(days.median()) if len(days) else 0,
                      'worst_sup': wsup, 'worst_n': wn})
-        if org == 'ALL' and len(openq):
-            q = openq.assign(_d=days, _stage=stage)
-            queue_rows.append(q[['Order Number', 'Supplier Name', '_origin', '_stage', '_d']]
-                              .assign(_due=due_cache[stage][om]))
+        if org == 'ALL':
+            if len(openq):
+                q = openq.assign(_d=days, _stage=stage, _urg='Overdue')
+                queue_rows.append(q[['Order Number', 'Supplier Name', '_origin', '_stage', '_d', '_urg']]
+                                  .assign(_due=due_cache[stage][om]))
+            if um.any():
+                u = mile[um]
+                u = u.assign(_d=-(due_cache[stage][um] - TODAY).dt.days, _stage=stage, _urg='Urgent')
+                urgent_rows.append(u[['Order Number', 'Supplier Name', '_origin', '_stage', '_d', '_urg']]
+                                   .assign(_due=due_cache[stage][um]))
     strip[org] = rows
 D['strip'] = {'origins': origins, 'data': strip}
 
-q = pd.concat(queue_rows).sort_values('_d', ascending=False).head(CAP)
+# Cap each state separately: overdue rows carry positive day counts and urgent
+# ones negative, so a single sort would truncate every urgent row off the end.
+# Not capped: this table is what the action-queue headline drills into, so a
+# country filtered here has to return the same count the headline claims.
+_od = pd.concat(queue_rows).sort_values('_d', ascending=False) if queue_rows else pd.DataFrame()
+_ur = pd.concat(urgent_rows).sort_values('_d', ascending=False) if urgent_rows else pd.DataFrame()
+q = pd.concat([x for x in (_od, _ur) if len(x)])
 D['queue_raw'] = [{'Order': r['Order Number'], 'Supplier': r['Supplier Name'],
-                   'Origin': r['_origin'], 'Stage': r['_stage'],
-                   'Due': dstr(r['_due']), 'Days overdue': int(r['_d'])}
+                   'Origin': r['_origin'], 'Stage': r['_stage'], 'State': r['_urg'],
+                   'Due': dstr(r['_due']),
+                   'Days overdue': int(r['_d']) if r['_urg'] == 'Overdue' else None,
+                   'Days to due': None if r['_urg'] == 'Overdue' else int(-r['_d'])}
                   for _, r in q.iterrows()]
+
+# The action queue: what is actually chaseable right now, by origin and by stage,
+# so the headline number leads somewhere instead of just being a number.
+_allrows = pd.concat(queue_rows + urgent_rows)
+_by = (_allrows.assign(_o=lambda d: d['_urg'] == 'Overdue')
+               .groupby('_origin')['_o'].agg(overdue='sum', total='size').reset_index())
+_by['urgent'] = _by['total'] - _by['overdue']
+D['action'] = {
+    'overdue': int(sum(len(x) for x in queue_rows)),
+    'urgent': int(sum(len(x) for x in urgent_rows)),
+    'by_origin': [{'origin': r['_origin'], 'overdue': int(r['overdue']), 'urgent': int(r['urgent'])}
+                  for _, r in _by.sort_values('overdue', ascending=False).iterrows()],
+    'by_stage': [{'stage': st, 'overdue': int(open_cache[st].sum()), 'urgent': int(urgent_cache[st].sum())}
+                 for st, _, _, _ in STAGES if open_cache[st].sum() or urgent_cache[st].sum()],
+}
 
 # supplier league across every stage's open-overdue queue
 allq = pd.concat(queue_rows)
@@ -449,17 +486,24 @@ D['defs'] = {
         'date — not the due date — is the real deadline.'),
     'done_rule': (
         'Done means the milestone carries a segment, whatever that segment is. Open overdue means it '
-        f'carries none and its due date has already passed as of {TODAY.strftime("%d %b %Y")} — that is the '
-        'actionable queue. A milestone that is not done but is not yet due counts in neither column.'),
+        f'carries none and its due date has already passed as of {TODAY.strftime("%d %b %Y")}. Urgent means '
+        'it is not done and has passed its urgent date but not yet its due date — the last chance to act '
+        'before it breaches. Overdue and urgent together are the action queue; everything else is either '
+        'done or not yet due.'),
     'stages': stage_defs,
     'cards': [
         {'Figure': 'Stage strip · on time',
          'Population': f'{len(mile):,} PO milestones, ATD weeks {_wk}',
          'Counted as good': 'segment is DONE IN POSSIBLE',
          'Window': 'whole extract, not a rolling window'},
-        {'Figure': 'Open overdue queue',
+        {'Figure': 'Action queue (overdue)',
          'Population': 'same milestones',
-         'Counted as good': 'n/a — counts milestones with no segment and a due date in the past',
+         'Counted as good': 'n/a — counts milestones with no segment whose due date has passed',
+         'Window': f'as of {TODAY.strftime("%d %b %Y")}'},
+        {'Figure': 'Action queue (urgent)',
+         'Population': 'same milestones',
+         'Counted as good': 'n/a — not done, past the urgent date, but not yet past the due date: '
+                            'the last chance to act before it breaches',
          'Window': f'as of {TODAY.strftime("%d %b %Y")}'},
         {'Figure': 'KPI bars',
          'Population': 'OHA KPI rates × PEPCO weekly shipment counts, per origin',
