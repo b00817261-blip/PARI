@@ -5,7 +5,7 @@ report and the internal operational detail behind it.
 
 | | Pages | Audience | Built by |
 | --- | --- | --- | --- |
-| Client report | 01 Today · 02 Arrivals · 03 Due at DC · 04 Performance · 05 Watch list · 06 Monthly | shared with Pepco | `build_data.py` in the `PEPCO-` repo |
+| Client report | 01 Today · 02 Arrivals · 03 Due at DC · 04 Performance · 05 Watch list · 06 Monthly | shared with Pepco | `tools/build_client_data.py` |
 | Internal only | 07 Milestones · 08 Carriers · 09 Data quality · 10 Definitions | MOOV teams | `tools/build_dataset.py` here |
 
 Every figure appears exactly once. Where both reports measured the same thing —
@@ -103,25 +103,55 @@ assigns — and writes them into `D.defs`, which renders as the **Definitions**
 page. That page is generated, not hand-written, so it always describes the
 refresh currently deployed.
 
-**Refreshing the client half (pages 01–06).** That data comes from a different
-set of eleven exports and is built by `build_data.py` in the `PEPCO-` repo. Run
-that repo's build, then re-run `tools/merge_client_report.py` here:
+**Refreshing the client half (pages 01–06).** `tools/build_client_data.py` builds
+those pages from eleven exports of its own, two of which it shares with the
+internal build. Drop everything in the same folder and run both scripts:
+
+```sh
+python3 tools/build_client_data.py ~/exports --write        # pages 01-06
+python3 tools/build_dataset.py --src ~/exports --out D.json # pages 07-10, then re-inject
+```
+
+Run them in that order. The internal build owns the Definitions page and fills in
+the rows describing both halves, so it needs to see the client figures already in
+place.
+
+| Client export | Feeds |
+| --- | --- |
+| `latest_delivery_da…` | performance, Due at DC, monthly on-time, transit *(shared)* |
+| `PO_milestone_performance` | coded cargo-ready reasons *(shared)* |
+| `supplier_performance_2` | supplier names on Performance and Needs attention |
+| `AHOD_reason_code_2` | miss reasons, FM events, the S01 exclusion |
+| `destination_milestone` | Arrivals this week, port arrivals on Today |
+| `transport_carrier` | DC deliveries on Today |
+| `pepco_tranship_port_performance` | transshipment waiting |
+| `Monthly_Summary` | monthly TEU volume |
+| `destination_lead_time_analysis` | port-to-DC final leg |
+| `customs_clearance_finished` | customs held card *(optional)* |
+| `predictive_eta` | ETA reliability bars *(optional)* |
+
+The last two are optional. If they are absent the build keeps those cards'
+previous figures, prints them under **NOT UPDATED**, and the page labels each
+affected card with the extract date it is still showing — so nothing stale reads
+as current. Everything else is required and the build stops if it is missing.
+
+The as-of date is taken from the data (`max ATA`), not passed in. When both halves
+build from the same folder they land on the same date and the header shows one;
+if a refresh leaves them out of step the header shows both, and the Definitions
+page adds a caveat saying the two will not reconcile.
+
+**Re-running the structural merge.** `tools/merge_client_report.py` is what
+combined the two sites in the first place. You only need it again if the client
+report gains or loses a page:
 
 ```sh
 python3 tools/merge_client_report.py \
-  --client ../pepco-/index.html --internal index.html --out index.html
-python3 tools/build_dataset.py --src ~/exports --asof <date> --out D.json   # then re-inject
+  --client ../pepco-/index.html --internal <an internal-only index.html> --out index.html
 ```
 
-The merge always builds on the client file, because its stylesheet is a superset
-of the internal one's and its raw-data tables are sortable and filterable. Run
-the internal build straight afterwards — it owns the Definitions page and fills
-in the rows describing both halves.
-
-Because the two halves come from separate builds, the header carries **two**
-dates: `data as of` for the internal half and `client views` for the client half.
-They will normally be a day or two apart, and figures across the two will not
-reconcile exactly.
+It always builds on the client file, because that stylesheet is a superset of the
+internal one's and its raw-data tables are sortable and filterable. It also owns
+the header and stale-label behaviour, so re-run the two data builds afterwards.
 
 Two things the script cannot do for you:
 

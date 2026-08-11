@@ -57,6 +57,29 @@ RAWSRC_ADD = {
 }
 
 
+HEADER_AND_STALE_JS = """
+document.getElementById('asof').textContent = D.defs.as_of;
+// Both halves normally build from the same folder on the same day; only call out
+// the client date when a refresh has left the two out of step.
+if (D.perf.asof === D.defs.as_of) {
+  document.getElementById('asof2').closest('.stamp').innerHTML =
+    'data as of <b>' + D.defs.as_of + '</b> \\u00b7 refreshed 4\\u00d7/day';
+} else {
+  document.getElementById('asof2').textContent = D.perf.asof;
+}
+// A section whose extract was not supplied keeps its previous figures. Say so on
+// the card itself, so nothing stale reads as current under today's stamp.
+(D.not_updated || []).forEach(function(u){
+  var el = u.anchor && document.getElementById(u.anchor);
+  if (!el) return;
+  if (el.nextElementSibling && el.nextElementSibling.dataset.stale) return;
+  el.insertAdjacentHTML('afterend',
+    '<div data-stale="1" class="note" style="color:var(--rust-ink);font-weight:600">' +
+    'Not refreshed \\u2014 still the ' + (u.asof || 'previous') +
+    ' extract. Needs the ' + u.needs + ' export.</div>');
+});
+"""
+
 def section(html, sid):
     m = re.search(r'(<section class="page[^"]*" id="p-%s">.*?</section>)' % sid, html, re.S)
     if not m:
@@ -179,12 +202,10 @@ function renderDem(){
 boot_old = 'renderToday(); renderArr(); renderPipe(); renderPerfWk(); renderWatch(); renderTrends(); renderReliability(); renderTransit(); bindRaw();'
 boot_new = (fns +
             "\nObject.assign(RAWSRC, " + json.dumps(RAWSRC_ADD) + ");\n" +
-            # the header carries both dates: this page is two extracts stitched together
-            "document.getElementById('asof').textContent = D.defs.as_of;\n"
-            "document.getElementById('asof2').textContent = D.perf.asof;\n" +
             boot_old.replace('bindRaw();',
                              'renderStrip(); renderKpi(); renderDoc(); renderLeague(); '
-                             'renderCarr(); renderDem(); renderDq(); renderDefs(); bindRaw();'))
+                             'renderCarr(); renderDem(); renderDq(); renderDefs(); bindRaw();') +
+            HEADER_AND_STALE_JS)
 out = out.replace(boot_old, boot_new)
 
 # internal buttons point at the client registry keys

@@ -383,11 +383,11 @@ def extend_defs_for_client(dd, client):
          'Counted as good': 'strict and +7-day definitions shown together',
          'Window': 'rolling extract; first and last months are partial'},
     ] + dd['cards']
-    dd['caveats'] = [
+    split = ([] if client['perf']['asof'] == dd['as_of'] else [
         '<b>This page is two extracts stitched together.</b> Pages 01\u201306 come from the client '
         f"report build ({client['perf']['asof']}) and pages 07\u201310 from the internal build "
-        f"({dd['as_of']}). Figures across the two halves are a day apart and will not reconcile "
-        'exactly. Refreshing the client half needs its own set of exports.',
+        f"({dd['as_of']}). Figures across the two halves will not reconcile exactly."])
+    dd['caveats'] = split + [
         '<b>Each figure appears once.</b> Delivery performance, customs holds and cargo-ready reasons '
         'are the client report\u2019s versions throughout \u2014 they carry definitions, windows and '
         'causes the internal extracts do not. The internal duplicates were removed rather than shown '
