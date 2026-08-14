@@ -323,7 +323,7 @@ if HAVE["peta"]:
         })
 
 else:
-    skipped("Pepco Predictive ETA", "ETA reliability bars on Arrivals")
+    skipped("Pepco Predictive ETA", "ETA reliability bars on In transit")
     peta_rows, horizons, pa = None, None, None
 
 # ------------------------------------------------------------ customs ------
@@ -357,7 +357,7 @@ if HAVE["cust"]:
 
 else:
     skipped("Incomplete Reason - Customs Clearance Finished",
-            "customs held card on Watch list")
+            "customs held card on Destination")
     customs_win = None
     raw_customs_win = {"d7": [], "d30": [], "d90": []}
 
@@ -867,8 +867,8 @@ D["not_updated"] = [{"section": what, "needs": export,
                      # a section that stayed behind keeps the date it was last
                      # actually built, not the date of the run that skipped it
                      "asof": _prev_stale.get(what) or PREV.get("perf", {}).get("asof"),
-                     "anchor": {"customs held card on Watch list": "cu-note",
-                                "ETA reliability bars on Arrivals": "rel-note"}.get(what)}
+                     "anchor": {"customs held card on Destination": "cu-note",
+                                "ETA reliability bars on In transit": "rel-note"}.get(what)}
                     for export, what in not_updated]
 
 if not HAVE["peta"]:

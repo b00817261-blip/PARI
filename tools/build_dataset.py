@@ -421,9 +421,10 @@ def extend_defs_for_client(dd, client):
          'Window': 'rolling extract; first and last months are partial'},
     ] + dd['cards']
     split = ([] if client['perf']['asof'] == dd['as_of'] else [
-        '<b>This page is two extracts stitched together.</b> Pages 01\u201306 come from the client '
-        f"report build ({client['perf']['asof']}) and pages 07\u201310 from the internal build "
-        f"({dd['as_of']}). Figures across the two halves will not reconcile exactly."])
+        '<b>This page is built from two extracts on different dates.</b> Client-sourced figures '
+        '(Origin KPI steps, In transit, Destination performance, Trends) are as of ' +
+        client['perf']['asof'] + '; internal-sourced figures (the action queue, supplier league, ' +
+        'carriers, data quality) are as of ' + dd['as_of'] + '. They will not reconcile exactly.'])
     dd['caveats'] = split + [
         '<b>Each figure appears once.</b> Delivery performance, customs holds and cargo-ready reasons '
         'are the client report\u2019s versions throughout \u2014 they carry definitions, windows and '
