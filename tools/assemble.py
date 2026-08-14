@@ -98,7 +98,7 @@ def snippet(html, needle, before=0):
 
 
 ACTION_CARD = """  <div class="card attn" id="act-card">
-    <div class="lvl">Action queue \u00b7 open right now</div>
+    <div class="lvl alert">Action queue \u00b7 open right now</div>
     <div class="headline" style="margin-bottom:4px">
       <div class="big" style="font-size:44px;color:var(--rust)" id="act-od"></div>
       <div class="hmeta" id="act-sub"></div>
@@ -180,6 +180,19 @@ out = out.replace('data as of <b id="asof"></b> \u00b7 refreshed 4\u00d7/day',
 out = out.replace('  --amber:#B97A1C; --amber-tint:#FBF3E4;\n',
                   '  --amber:#96620E; --amber-bar:#C8871B; --amber-tint:#FBF3E4;\n'
                   '  --rust-ink:#B8420F; --neutral:#6B7A8D;\n')
+
+# Orange had become decoration: every card label, every sub-label, the nav
+# accent and the heading rules all used it, so the things that are actually
+# wrong could not stand out. Restrict it to "act on this" and make everything
+# structural neutral.
+out = out.replace('</style>', """
+:root{ --label:#5A6B80; }
+.lvl{color:var(--label)}                      /* section labels: quiet by default */
+.lvl.alert{color:var(--rust-ink)}             /* only where something is wrong */
+nav button.on{border-left-color:var(--sea);background:linear-gradient(90deg,var(--sea-tint),transparent)}
+nav button.on .navnum{color:var(--sea)}
+h1::before{background:linear-gradient(90deg,var(--sea-deep) 0 58%,var(--sea-2) 58% 100%)}
+</style>""")
 
 nav = '\n'.join(
     '  <button%s data-p="%s"><span class="navnum">%02d</span>%s</button>'
@@ -429,6 +442,9 @@ out = out.replace('id="raw-kpi"', 'id="raw-kpi_steps"')
 # The client source card still says "Today page" \u2014 that page is now "Act now".
 out = out.replace("Same population as the Today page\'s needs-attention list",
                   "Same population as the Act now page\'s needs-attention list")
+
+out = out.replace('<div class="lvl">Needs attention</div>',
+                  '<div class="lvl alert">Needs attention</div>')
 
 out = DATA.sub(lambda m: 'const D = ' + json.dumps(D, separators=(',', ':'), ensure_ascii=False) + ';\n',
                out, count=1)
