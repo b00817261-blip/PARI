@@ -36,14 +36,27 @@ def find(fragment):
     return sorted(hits)[0]
 
 
-F_MILE = find('PO_milestone_performance')
+def find_opt(fragment):
+    """Like find(), but returns None instead of exiting when the export is absent."""
+    hits = [p for p in glob.glob(os.path.join(SRC, '*.xlsx'))
+            if fragment.lower() in os.path.basename(p).lower()]
+    return sorted(hits)[0] if hits else None
+
+
+# The previously deployed dataset, so a block whose export is missing from this
+# refresh can keep its figures instead of collapsing to zero.
+INDEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'index.html')
+old = json.loads(re.search(r'const D = (\{.*?\});\n',
+                           open(INDEX, encoding='utf-8').read(), re.S).group(1))
+
+F_MILE = find_opt('PO_milestone_performance')
 F_DELIV = find('latest_delivery_data')
 F_DEM = find('demurrage__detention_tracker')
 F_REJ = find('booking_rejection_analysis')
 F_SCORE = find('pepco_carrier_scoring')
 F_PERF = find('carrier_performance')
-F_KPI = find('OHA_KPI')
-F_VOL = find('pepco_weekly_volume')
+F_KPI = find_opt('OHA_KPI')
+F_VOL = find_opt('pepco_weekly_volume')
 F_DOC = find('shipping_document_verification')
 
 # Warehouse code -> site, from the DC x FND-Booked crosstab in the D&D tracker.
@@ -100,159 +113,234 @@ def clean(o):
 D = {}
 
 # ---------------------------------------------------------------- milestones
-mile, trunc = load(F_MILE)
-if trunc:
-    notes.append(f'PO milestone export truncated by the source system at {len(mile):,} rows '
-                 f'(weeks {mile["ATD Week"].min()} to {mile["ATD Week"].max()}).')
-mile['_origin'] = mile['Origin Location'].fillna('??')
+if F_MILE:
+    mile, trunc = load(F_MILE)
+    if trunc:
+        notes.append(f'PO milestone export truncated by the source system at {len(mile):,} rows '
+                     f'(weeks {mile["ATD Week"].min()} to {mile["ATD Week"].max()}).')
+    mile['_origin'] = mile['Origin Location'].fillna('??')
 
-# Two actionable states, both meaning "not done yet":
-#   overdue - the due date has passed
-#   urgent  - past the urgent date but not yet past the due date, i.e. the last
-#             chance to act before it breaches
-due_cache, urg_cache, open_cache, urgent_cache = {}, {}, {}, {}
-for stage, segc, duec, ovdc in STAGES:
-    due_cache[stage] = pd.to_datetime(mile[duec], errors='coerce')
-    urg_cache[stage] = pd.to_datetime(mile[duec.replace('Due Date', 'Urgent Date')], errors='coerce')
-    open_cache[stage] = mile[segc].isna() & (due_cache[stage] < TODAY)
-    urgent_cache[stage] = (mile[segc].isna() & (urg_cache[stage] <= TODAY)
-                           & (due_cache[stage] >= TODAY))
-
-origins = ['ALL'] + sorted(mile['_origin'].value_counts().loc[lambda s: s >= 50].index.tolist())
-strip = {}
-queue_rows, urgent_rows = [], []
-for org in origins:
-    sel = slice(None) if org == 'ALL' else (mile['_origin'] == org)
-    sub = mile if org == 'ALL' else mile[sel]
-    rows = []
+    # Two actionable states, both meaning "not done yet":
+    #   overdue - the due date has passed
+    #   urgent  - past the urgent date but not yet past the due date, i.e. the last
+    #             chance to act before it breaches
+    due_cache, urg_cache, open_cache, urgent_cache = {}, {}, {}, {}
     for stage, segc, duec, ovdc in STAGES:
-        seg = sub[segc]
-        done = int(seg.notna().sum())
-        ontime = round(100 * (seg == 'DONE IN POSSIBLE').sum() / done, 1) if done else 0.0
-        late = round(100 * (seg == 'DONE IN OVERDUE').sum() / done, 1) if done else 0.0
-        om = open_cache[stage] if org == 'ALL' else (open_cache[stage] & sel)
-        um = urgent_cache[stage] if org == 'ALL' else (urgent_cache[stage] & sel)
-        openq = mile[om]
-        days = (TODAY - due_cache[stage][om]).dt.days
-        if len(openq):
-            worst = openq['Supplier Name'].value_counts()
-            wsup, wn = str(worst.index[0])[:34], int(worst.iloc[0])
-        else:
-            wsup, wn = '—', 0
-        rows.append({'stage': stage, 'done': done, 'ontime': ontime, 'late_done': late,
-                     'open_overdue': int(len(openq)), 'urgent': int(um.sum()),
-                     'med_days': int(days.median()) if len(days) else 0,
-                     'worst_sup': wsup, 'worst_n': wn})
-        if org == 'ALL':
+        due_cache[stage] = pd.to_datetime(mile[duec], errors='coerce')
+        urg_cache[stage] = pd.to_datetime(mile[duec.replace('Due Date', 'Urgent Date')], errors='coerce')
+        open_cache[stage] = mile[segc].isna() & (due_cache[stage] < TODAY)
+        urgent_cache[stage] = (mile[segc].isna() & (urg_cache[stage] <= TODAY)
+                               & (due_cache[stage] >= TODAY))
+
+    origins = ['ALL'] + sorted(mile['_origin'].value_counts().loc[lambda s: s >= 50].index.tolist())
+    strip = {}
+    queue_rows, urgent_rows = [], []
+    for org in origins:
+        sel = slice(None) if org == 'ALL' else (mile['_origin'] == org)
+        sub = mile if org == 'ALL' else mile[sel]
+        rows = []
+        for stage, segc, duec, ovdc in STAGES:
+            seg = sub[segc]
+            done = int(seg.notna().sum())
+            ontime = round(100 * (seg == 'DONE IN POSSIBLE').sum() / done, 1) if done else 0.0
+            late = round(100 * (seg == 'DONE IN OVERDUE').sum() / done, 1) if done else 0.0
+            om = open_cache[stage] if org == 'ALL' else (open_cache[stage] & sel)
+            um = urgent_cache[stage] if org == 'ALL' else (urgent_cache[stage] & sel)
+            openq = mile[om]
+            days = (TODAY - due_cache[stage][om]).dt.days
             if len(openq):
-                q = openq.assign(_d=days, _stage=stage, _urg='Overdue')
-                queue_rows.append(q[['Order Number', 'Supplier Name', '_origin', '_stage', '_d', '_urg']]
-                                  .assign(_due=due_cache[stage][om]))
-            if um.any():
-                u = mile[um]
-                u = u.assign(_d=-(due_cache[stage][um] - TODAY).dt.days, _stage=stage, _urg='Urgent')
-                urgent_rows.append(u[['Order Number', 'Supplier Name', '_origin', '_stage', '_d', '_urg']]
-                                   .assign(_due=due_cache[stage][um]))
-    strip[org] = rows
-D['strip'] = {'origins': origins, 'data': strip}
+                worst = openq['Supplier Name'].value_counts()
+                wsup, wn = str(worst.index[0])[:34], int(worst.iloc[0])
+            else:
+                wsup, wn = '—', 0
+            rows.append({'stage': stage, 'done': done, 'ontime': ontime, 'late_done': late,
+                         'open_overdue': int(len(openq)), 'urgent': int(um.sum()),
+                         'med_days': int(days.median()) if len(days) else 0,
+                         'worst_sup': wsup, 'worst_n': wn})
+            if org == 'ALL':
+                if len(openq):
+                    q = openq.assign(_d=days, _stage=stage, _urg='Overdue')
+                    queue_rows.append(q[['Order Number', 'Supplier Name', '_origin', '_stage', '_d', '_urg']]
+                                      .assign(_due=due_cache[stage][om]))
+                if um.any():
+                    u = mile[um]
+                    u = u.assign(_d=-(due_cache[stage][um] - TODAY).dt.days, _stage=stage, _urg='Urgent')
+                    urgent_rows.append(u[['Order Number', 'Supplier Name', '_origin', '_stage', '_d', '_urg']]
+                                       .assign(_due=due_cache[stage][um]))
+        strip[org] = rows
+    D['strip'] = {'origins': origins, 'data': strip}
 
-# Cap each state separately: overdue rows carry positive day counts and urgent
-# ones negative, so a single sort would truncate every urgent row off the end.
-# Not capped: this table is what the action-queue headline drills into, so a
-# country filtered here has to return the same count the headline claims.
-_od = pd.concat(queue_rows).sort_values('_d', ascending=False) if queue_rows else pd.DataFrame()
-_ur = pd.concat(urgent_rows).sort_values('_d', ascending=False) if urgent_rows else pd.DataFrame()
-q = pd.concat([x for x in (_od, _ur) if len(x)])
-D['queue_raw'] = [{'Order': r['Order Number'], 'Supplier': r['Supplier Name'],
-                   'Origin': r['_origin'], 'Stage': r['_stage'], 'State': r['_urg'],
-                   'Due': dstr(r['_due']),
-                   'Days overdue': int(r['_d']) if r['_urg'] == 'Overdue' else None,
-                   'Days to due': None if r['_urg'] == 'Overdue' else int(-r['_d'])}
-                  for _, r in q.iterrows()]
+    # Cap each state separately: overdue rows carry positive day counts and urgent
+    # ones negative, so a single sort would truncate every urgent row off the end.
+    # Not capped: this table is what the action-queue headline drills into, so a
+    # country filtered here has to return the same count the headline claims.
+    _od = pd.concat(queue_rows).sort_values('_d', ascending=False) if queue_rows else pd.DataFrame()
+    _ur = pd.concat(urgent_rows).sort_values('_d', ascending=False) if urgent_rows else pd.DataFrame()
+    q = pd.concat([x for x in (_od, _ur) if len(x)])
+    D['queue_raw'] = [{'Order': r['Order Number'], 'Supplier': r['Supplier Name'],
+                       'Origin': r['_origin'], 'Stage': r['_stage'], 'State': r['_urg'],
+                       'Due': dstr(r['_due']),
+                       'Days overdue': int(r['_d']) if r['_urg'] == 'Overdue' else None,
+                       'Days to due': None if r['_urg'] == 'Overdue' else int(-r['_d'])}
+                      for _, r in q.iterrows()]
 
-# The action queue: what is actually chaseable right now, by origin and by stage,
-# so the headline number leads somewhere instead of just being a number.
-_allrows = pd.concat(queue_rows + urgent_rows)
-_by = (_allrows.assign(_o=lambda d: d['_urg'] == 'Overdue')
-               .groupby('_origin')['_o'].agg(overdue='sum', total='size').reset_index())
-_by['urgent'] = _by['total'] - _by['overdue']
-D['action'] = {
-    'overdue': int(sum(len(x) for x in queue_rows)),
-    'urgent': int(sum(len(x) for x in urgent_rows)),
-    'by_origin': [{'origin': r['_origin'], 'overdue': int(r['overdue']), 'urgent': int(r['urgent'])}
-                  for _, r in _by.sort_values('overdue', ascending=False).iterrows()],
-    'by_stage': [{'stage': st, 'overdue': int(open_cache[st].sum()), 'urgent': int(urgent_cache[st].sum())}
-                 for st, _, _, _ in STAGES if open_cache[st].sum() or urgent_cache[st].sum()],
-}
+    # The action queue: what is actually chaseable right now, by origin and by stage,
+    # so the headline number leads somewhere instead of just being a number.
+    _allrows = pd.concat(queue_rows + urgent_rows)
+    _by = (_allrows.assign(_o=lambda d: d['_urg'] == 'Overdue')
+                   .groupby('_origin')['_o'].agg(overdue='sum', total='size').reset_index())
+    _by['urgent'] = _by['total'] - _by['overdue']
+    D['action'] = {
+        'overdue': int(sum(len(x) for x in queue_rows)),
+        'urgent': int(sum(len(x) for x in urgent_rows)),
+        'by_origin': [{'origin': r['_origin'], 'overdue': int(r['overdue']), 'urgent': int(r['urgent'])}
+                      for _, r in _by.sort_values('overdue', ascending=False).iterrows()],
+        'by_stage': [{'stage': st, 'overdue': int(open_cache[st].sum()), 'urgent': int(urgent_cache[st].sum())}
+                     for st, _, _, _ in STAGES if open_cache[st].sum() or urgent_cache[st].sum()],
+    }
 
-# supplier league across every stage's open-overdue queue
-allq = pd.concat(queue_rows)
-lg = (allq.groupby('Supplier Name')
-          .agg(n=('_d', 'size'), mx=('_d', 'max'))
-          .sort_values('n', ascending=False).head(12))
-D['sup_league'] = [{'Supplier': s, 'Open overdue': int(r.n),
-                    'Worst stage': allq[allq['Supplier Name'] == s]['_stage'].value_counts().index[0],
-                    'Max days': int(r.mx)} for s, r in lg.iterrows()]
+    # supplier league across every stage's open-overdue queue
+    allq = pd.concat(queue_rows)
+    lg = (allq.groupby('Supplier Name')
+              .agg(n=('_d', 'size'), mx=('_d', 'max'))
+              .sort_values('n', ascending=False).head(12))
+    D['sup_league'] = [{'Supplier': s, 'Open overdue': int(r.n),
+                        'Worst stage': allq[allq['Supplier Name'] == s]['_stage'].value_counts().index[0],
+                        'Max days': int(r.mx)} for s, r in lg.iterrows()]
 
-# cargo-ready-date misses, by coded reason
-crd = mile[mile['Cargo Ready Date Reason'].notna()].copy()
-crd['_days'] = pd.to_numeric(crd['CRD Overdue Days'], errors='coerce').fillna(0)
-
-
-
-def owner(reason):
-    r = str(reason)
-    if ' - ' in r:
-        return r.split(' - ')[1].strip()
-    return 'Other'
+    # cargo-ready-date misses, by coded reason
+    crd = mile[mile['Cargo Ready Date Reason'].notna()].copy()
+    crd['_days'] = pd.to_numeric(crd['CRD Overdue Days'], errors='coerce').fillna(0)
 
 
-crd['_own'] = crd['Cargo Ready Date Reason'].map(owner)
+
+    def owner(reason):
+        r = str(reason)
+        if ' - ' in r:
+            return r.split(' - ')[1].strip()
+        return 'Other'
+
+
+    crd['_own'] = crd['Cargo Ready Date Reason'].map(owner)
+else:
+    # No PO_milestone_performance export in this refresh. Everything the origin
+    # stage strip, the action queue and the supplier league count comes from it and
+    # from nowhere else, so those blocks keep the figures they were last built with
+    # and the page labels them with the extract date they are still showing.
+    mile = None
+    for _k in ('strip', 'action', 'sup_league'):
+        D[_k] = old[_k]
+    # the action-queue drill-down table lives in the shared raw registry
+    D['queue_raw'] = old['raw']['queue']
+    notes.append('Origin stage strip, action queue and supplier league carried over from the '
+                 + old['defs']['as_of'] + ' extract - no PO_milestone_performance export was '
+                 'supplied in this refresh.')
+    # Label each carried-over card on the page itself, so a stale figure is never
+    # read as current under today's header date.
+    _stale_asof = old['defs']['as_of']
+    D['not_updated'] = (old.get('not_updated') or []) + [
+        {'section': 'action queue on Act now', 'needs': 'PO_milestone_performance',
+         'asof': _stale_asof, 'anchor': 'act-card'},
+        {'section': 'stage strip on Origin', 'needs': 'PO_milestone_performance',
+         'asof': _stale_asof, 'anchor': 'strip'},
+        {'section': 'supplier league on Origin', 'needs': 'PO_milestone_performance',
+         'asof': _stale_asof, 'anchor': 'raw-queue-2'},
+    ]
 
 
 # ------------------------------------------------------------------- KPI set
-kpi_raw = pd.read_excel(F_KPI, engine='openpyxl', header=None)
-vol_raw = pd.read_excel(F_VOL, engine='openpyxl', header=None)
+if F_KPI and F_VOL:
+    kpi_raw = pd.read_excel(F_KPI, engine='openpyxl', header=None)
+    vol_raw = pd.read_excel(F_VOL, engine='openpyxl', header=None)
 
 
-def wide_blocks(df, nmetric):
-    """Week-blocked pivot -> {(week, metric, origin): value}."""
-    weeks = df.iloc[0].tolist()
-    labels = df.iloc[1].tolist()
-    out = {}
-    for r in range(2, len(df)):
-        org = df.iloc[r, 3]
-        if not isinstance(org, str):
-            continue
-        for c in range(5 if nmetric == 13 else 4, df.shape[1]):
-            wk, lab, val = weeks[c], labels[c], df.iloc[r, c]
-            if isinstance(wk, str) and isinstance(lab, str) and pd.notna(val):
-                out[(wk, lab, org)] = val
-    return out
-
-
-kpi_vals = wide_blocks(kpi_raw, 13)
-vol_vals = wide_blocks(vol_raw, 3)
-recent = sorted({w for w, _, _ in kpi_vals}, reverse=True)[1:9]   # 8 complete weeks
-notes.append('KPI card: weighted by shipments over weeks ' + recent[-1] + ' to ' + recent[0] + '.')
-
-steps = [l for l in kpi_raw.iloc[1].tolist()[5:18] if isinstance(l, str)]
-kpi_rows = []
-for step in steps:
-    ship = ok = 0.0
-    for wk in recent:
-        for org in set(o for _, _, o in kpi_vals):
-            rate = kpi_vals.get((wk, step, org))
-            n = vol_vals.get((wk, 'Total Shipment', org))
-            if rate is None or n is None:
+    def wide_blocks(df, nmetric):
+        """Week-blocked pivot -> {(week, metric, origin): value}."""
+        weeks = df.iloc[0].tolist()
+        labels = df.iloc[1].tolist()
+        out = {}
+        for r in range(2, len(df)):
+            org = df.iloc[r, 3]
+            if not isinstance(org, str):
                 continue
-            ship += float(n)
-            ok += float(n) * float(rate)
-    if ship:
-        kpi_rows.append({'Step': step, 'Ontime': int(round(ok)),
-                         'Not ontime': int(round(ship - ok)),
-                         'Pct': round(100 * ok / ship, 1)})
-D['kpi'] = sorted(kpi_rows, key=lambda r: r['Pct'])
+            for c in range(5 if nmetric == 13 else 4, df.shape[1]):
+                wk, lab, val = weeks[c], labels[c], df.iloc[r, c]
+                if isinstance(wk, str) and isinstance(lab, str) and pd.notna(val):
+                    out[(wk, lab, org)] = val
+        return out
+
+
+    kpi_vals = wide_blocks(kpi_raw, 13)
+    vol_vals = wide_blocks(vol_raw, 3)
+    recent = sorted({w for w, _, _ in kpi_vals}, reverse=True)[1:9]   # 8 complete weeks
+    notes.append('KPI card: weighted by shipments over weeks ' + recent[-1] + ' to ' + recent[0] + '.')
+
+    steps = [l for l in kpi_raw.iloc[1].tolist()[5:18] if isinstance(l, str)]
+    kpi_rows = []
+    for step in steps:
+        ship = ok = 0.0
+        for wk in recent:
+            for org in set(o for _, _, o in kpi_vals):
+                rate = kpi_vals.get((wk, step, org))
+                n = vol_vals.get((wk, 'Total Shipment', org))
+                if rate is None or n is None:
+                    continue
+                ship += float(n)
+                ok += float(n) * float(rate)
+        if ship:
+            kpi_rows.append({'Step': step, 'Ontime': int(round(ok)),
+                             'Not ontime': int(round(ship - ok)),
+                             'Pct': round(100 * ok / ship, 1)})
+    D['kpi'] = sorted(kpi_rows, key=lambda r: r['Pct'])
+else:
+    # The 2026-08-23 refresh delivered the origin KPI data row-level - one row per
+    # order with an Ontime / Not Ontime verdict per step - instead of the
+    # week-blocked pivot of rates this card used to be weighted from. Count the
+    # verdicts directly: no shipment weighting is needed when every order is a row.
+    #
+    # Only steps that appear, unambiguously, in BOTH export shapes are carried.
+    # The pivot measured thirteen; these files carry five. The ones with no column
+    # here (SI/VGM Submit, Release HBL and Invoice, Verify Shipping Documents,
+    # Container Gate in, Cargo Inbound, Pre Alert, Latest CRD To Booked ETD,
+    # Carrier Booking) are dropped rather than guessed at from a similar-looking
+    # column, and the Definitions page says so.
+    STEPCOLS = {
+        'Booking Validation':     ('Booking Validation Status',      'Shipper Booking Valiation'),
+        'Assign Transport Plan':  ('Assign Transport Plan Status',   'Assign Transport Plan'),
+        'So Release To Supplier': ('So Release To Supplier Status',  'SO Release To Supplier'),
+        'AHOD Update':            ('AHOD Update Status',             'AHOD Status'),
+        'Vessel Departure':       ('Vessel Departure Status',        'Vessel Departure'),
+    }
+    _parts = []
+    for _p in sorted(glob.glob(os.path.join(SRC, 'origin_oha_*.xlsx'))) + \
+              sorted(glob.glob(os.path.join(SRC, 'origin_kpi_report*.xlsx'))):
+        _d, _ = load(_p)
+        _out = {'Order Number': _d['Order Number'].astype(str), 'ETD Month': _d['ETD Month']}
+        for _step, (_a, _b) in STEPCOLS.items():
+            _c = _a if _a in _d.columns else (_b if _b in _d.columns else None)
+            _out[_step] = _d[_c].astype(str).str.strip() if _c else pd.Series(pd.NA, index=_d.index)
+        _parts.append(pd.DataFrame(_out))
+    if not _parts:
+        sys.exit('no OHA_KPI pivot and no row-level origin_* exports in ' + SRC)
+    # Country files are complete for their country; the global export is truncated
+    # by the source system, so it only fills in orders the country files do not hold.
+    _kpi = pd.concat(_parts, ignore_index=True).drop_duplicates('Order Number', keep='first')
+    _kpi['_m'] = pd.to_datetime(_kpi['ETD Month'], errors='coerce').dt.strftime('%Y-%m')
+    _months = sorted(m for m in _kpi['_m'].dropna().unique() if m < TODAY.strftime('%Y-%m'))
+    recent = _months[-2:]
+    _win = _kpi[_kpi['_m'].isin(recent)]
+    kpi_rows = []
+    for _step in STEPCOLS:
+        _v = _win[_step]
+        _ok, _no = int((_v == 'Ontime').sum()), int((_v == 'Not Ontime').sum())
+        if _ok + _no:
+            kpi_rows.append({'Step': _step, 'Ontime': _ok, 'Not ontime': _no,
+                             'Pct': round(100 * _ok / (_ok + _no), 1)})
+    D['kpi'] = sorted(kpi_rows, key=lambda r: r['Pct'])
+    notes.append(f'KPI card rebuilt from the row-level origin exports over ETD months '
+                 f'{recent[0]} to {recent[-1]} ({len(_win):,} orders, counted directly rather '
+                 f'than weighted). Five steps, down from thirteen: the row-level exports carry '
+                 f'no column for the other eight.')
 
 # --------------------------------------------------------------- carriers
 score, _ = load(F_SCORE)
@@ -336,8 +424,11 @@ recent_eta = int((dl['_ata'].isna() & (feta < TODAY) & (feta >= TODAY - pd.Timed
 
 late_orders = dl[dl['_ata'].notna() & (dl['_ata'] > dl['_indc'])]
 miss_uncoded = int(late_orders['Miss In DC Date Reason Type'].isna().sum())
-crd_overdue = mile[pd.to_numeric(mile['CRD Overdue Days'], errors='coerce') > 0]
-crd_uncoded = int(crd_overdue['Cargo Ready Date Reason'].isna().sum())
+if mile is not None:
+    crd_overdue = mile[pd.to_numeric(mile['CRD Overdue Days'], errors='coerce') > 0]
+    crd_uncoded = int(crd_overdue['Cargo Ready Date Reason'].isna().sum())
+else:
+    crd_overdue, crd_uncoded = None, None
 doc, _ = load(F_DOC)
 doc['Status'] = doc['Status'].astype(str).str.strip()
 # the source carries 'V008 - Do not clear' twice, once with a hyphen and once with an en dash
@@ -368,8 +459,10 @@ D['dq'] = {
     'uncoded': [
         {'What': 'Late orders with no reason code', 'Share': pc(miss_uncoded, len(late_orders)),
          'Detail': f'{miss_uncoded:,} of {len(late_orders):,} orders that missed their in-DC date'},
-        {'What': 'Overdue CRDs with no coded reason', 'Share': pc(crd_uncoded, len(crd_overdue)),
-         'Detail': f'{crd_uncoded:,} of {len(crd_overdue):,}'},
+        ({'What': 'Overdue CRDs with no coded reason', 'Share': pc(crd_uncoded, len(crd_overdue)),
+          'Detail': f'{crd_uncoded:,} of {len(crd_overdue):,}'}
+         if mile is not None else
+         next(r for r in old['dq']['uncoded'] if r['What'].startswith('Overdue CRDs'))),
         {'What': 'Booking rejections with no reason code', 'Share': pc(int(rej['Reject Reason Code'].isna().sum()), len(rej)),
          'Detail': f"{int(rej['Reject Reason Code'].isna().sum()):,} of {len(rej):,} — MOOV rejects carry free-text remarks only"},
         {'What': 'Containers with no contractual free time', 'Share': pc(int(dem['Free Time Storage'].isna().sum()), len(dem)),
@@ -434,9 +527,6 @@ def extend_defs_for_client(dd, client):
 
 
 # -------------------------------------------------- allocation (no new export)
-INDEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'index.html')
-old = json.loads(re.search(r'const D = (\{.*?\});\n',
-                           open(INDEX, encoding='utf-8').read(), re.S).group(1))
 D['allocation'] = old['allocation']
 # after the client-report merge this table lives in the shared raw registry
 D['allocation_raw'] = old.get('allocation_raw') or old['raw']['allocation']
@@ -446,9 +536,9 @@ notes.append('Allocation compliance carried over from the 2026-07-24 extract —
 # --------------------------------------------------------------- definitions
 # Measured from the exports rather than asserted, so the page always states the
 # window this particular refresh actually covers.
-_vd_due = pd.to_datetime(mile['Vessel Departure Due Date'], errors='coerce')
+_vd_due = pd.to_datetime(mile['Vessel Departure Due Date'], errors='coerce') if mile is not None else None
 stage_defs = []
-for stage, segc, duec, ovdc in STAGES:
+for stage, segc, duec, ovdc in (STAGES if mile is not None else []):
     donec = duec.replace('Due Date', 'Done Date')
     urgc = duec.replace('Due Date', 'Urgent Date')
     done = pd.to_datetime(mile[donec], errors='coerce')
@@ -470,7 +560,15 @@ for stage, segc, duec, ovdc in STAGES:
         'Dates reproduce segment': f'{match}%' if match is not None else '—',
     })
 
-_wk = f"{mile['ATD Week'].min()} → {mile['ATD Week'].max()}"
+if mile is None:
+    # keep the stage table and its population exactly as last measured
+    stage_defs = old['defs']['stages']
+    _wk = old['defs']['as_of']
+    _mile_pop = next((c['Population'] for c in old['defs']['cards']
+                      if c['Figure'].startswith('Stage strip')), '—')
+else:
+    _wk = f"{mile['ATD Week'].min()} → {mile['ATD Week'].max()}"
+    _mile_pop = f'{len(mile):,} PO milestones, ATD weeks {_wk}'
 _w0 = (TODAY - pd.Timedelta(days=30)).strftime('%d %b')
 _w1 = TODAY.strftime('%d %b %Y')
 _rej_t = pd.to_datetime(rej['Event Time'], errors='coerce')
@@ -494,7 +592,7 @@ D['defs'] = {
     'stages': stage_defs,
     'cards': [
         {'Figure': 'Stage strip · on time',
-         'Population': f'{len(mile):,} PO milestones, ATD weeks {_wk}',
+         'Population': _mile_pop,
          'Counted as good': 'segment is DONE IN POSSIBLE',
          'Window': 'whole extract, not a rolling window'},
         {'Figure': 'Action queue (overdue)',
@@ -509,7 +607,8 @@ D['defs'] = {
         {'Figure': 'KPI bars',
          'Population': 'OHA KPI rates × PEPCO weekly shipment counts, per origin',
          'Counted as good': 'the client-reported on-time rate for that step',
-         'Window': f'{recent[-1]} → {recent[0]} (8 complete ATD weeks)'},
+         'Window': (f'{recent[-1]} → {recent[0]} (8 complete ATD weeks)' if F_KPI and F_VOL
+                    else f'{recent[0]} → {recent[-1]} (2 complete ETD months, counted per order)')},
         {'Figure': 'Doc verification',
          'Population': f"{D['docver']['checks']:,} document checks with a verdict",
          'Counted as good': "Status is Complete; Incomplete carries a V-code reason group",
@@ -541,11 +640,13 @@ D['defs'] = {
          'Window': f'as of {TODAY.strftime("%d %b %Y")}'},
     ],
     'caveats': [
-        f'<b>Shipping docs is not its own measurement.</b> It carries its own done, due and urgent dates, '
-        f'but the segment the export assigns matches the Loading plan segment on '
-        f'{round(100 * (mile["Upload Shipping Documents Done Segment"].astype(str) == mile["Container Loading Plan Done Segment"].astype(str)).mean(), 1)}% of rows, '
-        f'while its own dates reproduce it on almost none. That is why the two rows show identical '
-        f'percentages. Treat the Shipping docs row as a copy of Loading plan until the source is fixed.',
+        (f'<b>Shipping docs is not its own measurement.</b> It carries its own done, due and urgent dates, '
+         f'but the segment the export assigns matches the Loading plan segment on '
+         f'{round(100 * (mile["Upload Shipping Documents Done Segment"].astype(str) == mile["Container Loading Plan Done Segment"].astype(str)).mean(), 1)}% of rows, '
+         f'while its own dates reproduce it on almost none. That is why the two rows show identical '
+         f'percentages. Treat the Shipping docs row as a copy of Loading plan until the source is fixed.'
+         if mile is not None else
+         next(c for c in old['defs']['caveats'] if 'Shipping docs is not its own' in c)),
         '<b>Later stages cannot be re-derived from the export.</b> The urgent/due/done rule reproduces the '
         'stated segment almost perfectly for Cargo ready and Dimensions, and progressively less well down '
         'the pipeline. Where the reproduction rate is low the segment is computed upstream against dates '

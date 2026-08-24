@@ -79,7 +79,10 @@ def note(s): notes.append(s)
 def assume(s): assumptions.append(s)
 
 
-REQUIRED = ["ldd", "sup", "ahod", "dest", "tc", "tran", "po", "msum", "dlt"]
+REQUIRED = ["ldd", "sup", "ahod", "dest", "tc", "tran", "dlt"]
+# "po" and "msum" were required until the 2026-08-23 refresh arrived without
+# them. They are now optional: their sections keep the previous figures and are
+# labelled with the extract date they are still showing.
 _absent = [k for k in REQUIRED if not HAVE[k]]
 if _absent:
     sys.exit("missing required extracts: " +
@@ -363,55 +366,80 @@ else:
 
 # --------------------------------------------------------------- CRD -------
 print("CRD reasons ...", flush=True)
-po = load("po", usecols=["Order Number", "Supplier Name", "Origin Location",
-                         "Cargo Ready Date Reason", "Cargo Ready Date Due Date",
-                         "CRD Overdue Days", "CRD Done Segment"])
-po["Cargo Ready Date Due Date"] = dt(po["Cargo Ready Date Due Date"])
-# The card asks "why suppliers MISS their cargo-ready date", so it must count
-# missed CRDs, not every order that happens to carry a reason code. Use the BI
-# tool's own classification rather than a hand-picked overdue-days threshold.
-coded = po[po["Cargo Ready Date Reason"].notna() &
-           (po["Cargo Ready Date Reason"].astype(str).str.strip() != "") &
-           (po["CRD Done Segment"].astype(str).str.strip().str.upper()
-            == "DONE IN OVERDUE")].copy()
-assume("CRD card counts orders where CRD Done Segment = 'DONE IN OVERDUE' and a "
-       "Cargo Ready Date Reason is recorded")
+if HAVE["po"]:
+    po = load("po", usecols=["Order Number", "Supplier Name", "Origin Location",
+                             "Cargo Ready Date Reason", "Cargo Ready Date Due Date",
+                             "CRD Overdue Days", "CRD Done Segment"])
+    po["Cargo Ready Date Due Date"] = dt(po["Cargo Ready Date Due Date"])
+    # The card asks "why suppliers MISS their cargo-ready date", so it must count
+    # missed CRDs, not every order that happens to carry a reason code. Use the BI
+    # tool's own classification rather than a hand-picked overdue-days threshold.
+    coded = po[po["Cargo Ready Date Reason"].notna() &
+               (po["Cargo Ready Date Reason"].astype(str).str.strip() != "") &
+               (po["CRD Done Segment"].astype(str).str.strip().str.upper()
+                == "DONE IN OVERDUE")].copy()
+    assume("CRD card counts orders where CRD Done Segment = 'DONE IN OVERDUE' and a "
+           "Cargo Ready Date Reason is recorded")
 
 
-def crd_group(code):
-    s = str(code)
-    if s.startswith("B"):
-        return "Buyer"
-    if s.startswith("S"):
-        return "Supplier"
-    if s.startswith("N"):
-        return "Natural Factors"
-    return "Other"
+    def crd_group(code):
+        s = str(code)
+        if s.startswith("B"):
+            return "Buyer"
+        if s.startswith("S"):
+            return "Supplier"
+        if s.startswith("N"):
+            return "Natural Factors"
+        return "Other"
 
 
-coded["grp"] = coded["Cargo Ready Date Reason"].map(crd_group)
-CRD_COLS = {"Order": "Order Number", "Supplier": "Supplier Name",
-            "Origin": "Origin Location", "Due": "Cargo Ready Date Due Date",
-            "Reason": "Cargo Ready Date Reason"}
-sup_reasons_win = {"windows": ["m3", "m6", "all"],
-                   "labels": {"m3": "Past 3 months", "m6": "Past 6 months", "all": "All time"},
-                   "data": {}}
-raw_crd_win = {}
-for key, mo in [("m3", 3), ("m6", 6), ("all", None)]:
-    sl = coded if mo is None else coded[coded["Cargo Ready Date Due Date"] >=
-                                        ASOF - pd.DateOffset(months=mo)]
-    sup_reasons_win["data"][key] = {
-        "total": int(len(sl)),
-        "split": {k: int(v) for k, v in sl["grp"].value_counts().items()},
-        "top": {str(k): int(v) for k, v in
-                sl["Cargo Ready Date Reason"].value_counts().head(8).items()},
-    }
-    raw_crd_win[key] = rows(sl.sort_values("Cargo Ready Date Due Date",
-                                           ascending=False).head(900), CRD_COLS)
+    coded["grp"] = coded["Cargo Ready Date Reason"].map(crd_group)
+    CRD_COLS = {"Order": "Order Number", "Supplier": "Supplier Name",
+                "Origin": "Origin Location", "Due": "Cargo Ready Date Due Date",
+                "Reason": "Cargo Ready Date Reason"}
+    sup_reasons_win = {"windows": ["m3", "m6", "all"],
+                       "labels": {"m3": "Past 3 months", "m6": "Past 6 months", "all": "All time"},
+                       "data": {}}
+    raw_crd_win = {}
+    for key, mo in [("m3", 3), ("m6", 6), ("all", None)]:
+        sl = coded if mo is None else coded[coded["Cargo Ready Date Due Date"] >=
+                                            ASOF - pd.DateOffset(months=mo)]
+        sup_reasons_win["data"][key] = {
+            "total": int(len(sl)),
+            "split": {k: int(v) for k, v in sl["grp"].value_counts().items()},
+            "top": {str(k): int(v) for k, v in
+                    sl["Cargo Ready Date Reason"].value_counts().head(8).items()},
+        }
+        raw_crd_win[key] = rows(sl.sort_values("Cargo Ready Date Due Date",
+                                               ascending=False).head(900), CRD_COLS)
+else:
+    # No PO_milestone_performance export in this refresh. The cargo-ready reason
+    # card is the only thing in this file that depends on it, so keep its previous
+    # figures verbatim and let the page label them with the date they came from.
+    sup_reasons_win = PREV.get("sup_reasons_win")
+    raw_crd_win = PREV.get("raw", {}).get("crd_win", {})
+    skipped("PO_milestone_performance", "coded cargo-ready reasons on Origin")
 
 # ---------------------------------------------------------- tranship -------
 print("tranship ...", flush=True)
 tran = load("tran")
+# The 2026-08-23 refresh delivers this export row-level (one row per booking,
+# raw ATA/ATD in the transit port) where it used to arrive pre-aggregated. Fold
+# the row-level shape into the aggregate columns the rest of this file expects,
+# so one booking = one container with its own dwell time.
+if "Count of Container" not in tran.columns:
+    _dw = pd.to_numeric(tran["ATA - ATD (Transit Port)"], errors="coerce")
+    tran = tran.assign(**{
+        "ATD Month": dt(tran["ATD at POL"]).dt.strftime("%Y-%m"),
+        "Count of Container": 1,
+        "Average of Expected Dwell time": _dw,
+        "Max of Expected Dwell time": _dw,
+    })
+    tran = tran[_dw.notna()]
+    note("tranship export arrived row-level and carries no container count, so "
+         "the card now counts BOOKINGS waiting, not containers - its labels were "
+         "changed to match. Dwell is measured per booking from ATA/ATD in the "
+         "transit port instead of read from a pre-aggregated column.")
 # The export carries artifact rows ("No filters applied", blanks) in ATD Month,
 # and a plain string max() picks those over any real YYYY-MM value.
 _months = sorted(m for m in tran["ATD Month"].dropna().unique()
@@ -419,8 +447,8 @@ _months = sorted(m for m in tran["ATD Month"].dropna().unique()
 _keep = _months[-2:]
 tran = tran[tran["ATD Month"].isin(_keep)]
 assume(f"tranship figures cover the two most recent ATD months ({', '.join(_keep)}); "
-       "the extract is pre-aggregated over all history, so it must be windowed")
-TRAN_COLS = {"Booking": "Carrier", "Carrier": "Carrier", "Transit port": "Transit Port",
+       "the extract spans all history, so it must be windowed")
+TRAN_COLS = {"Booking": "Booking Number", "Carrier": "Carrier", "Transit port": "Transit Port",
              "POL": "POL", "POD": "POD",
              "Days waiting": "Average of Expected Dwell time",
              "Est. total wait": "Max of Expected Dwell time"}
@@ -765,59 +793,71 @@ D_new_parts = {
 
 # ------------------------------------------------------ volume / TEU -------
 print("volume ...", flush=True)
-msum = load("msum")
-msum["Total TEU"] = pd.to_numeric(msum["Total TEU"], errors="coerce")
-mg = msum.groupby("ATA Month").agg(teu=("Total TEU", "sum"),
-                                   orders=("Total Order", "sum"),
-                                   cont=("Total Container", "sum")).reset_index()
-mg = mg[mg["ATA Month"].astype(str).str.match(r"\d{4}-\d{2}")].sort_values("ATA Month")
-volume_months = [{"ATA Month": r["ATA Month"], "teu": float(r["teu"]),
-                  "orders": int(r["orders"]), "cont": int(r["cont"])}
-                 for _, r in mg.tail(11).iterrows()]
-monthly_teu = {r["ATA Month"]: float(r["teu"]) for _, r in mg.iterrows()}
+if HAVE["msum"]:
+    msum = load("msum")
+    msum["Total TEU"] = pd.to_numeric(msum["Total TEU"], errors="coerce")
+    mg = msum.groupby("ATA Month").agg(teu=("Total TEU", "sum"),
+                                       orders=("Total Order", "sum"),
+                                       cont=("Total Container", "sum")).reset_index()
+    mg = mg[mg["ATA Month"].astype(str).str.match(r"\d{4}-\d{2}")].sort_values("ATA Month")
+    volume_months = [{"ATA Month": r["ATA Month"], "teu": float(r["teu"]),
+                      "orders": int(r["orders"]), "cont": int(r["cont"])}
+                     for _, r in mg.tail(11).iterrows()]
+    monthly_teu = {r["ATA Month"]: float(r["teu"]) for _, r in mg.iterrows()}
 
-last3 = list(mg["ATA Month"])[-3:]
-ports_3mo = (msum[msum["ATA Month"].isin(last3)]
-             .groupby("Destination Port")["Total TEU"].sum()
-             .sort_values(ascending=False))
-volume = {"months": volume_months,
-          "ports_3mo": {str(k): float(v) for k, v in ports_3mo.head(5).items()}}
+    last3 = list(mg["ATA Month"])[-3:]
+    ports_3mo = (msum[msum["ATA Month"].isin(last3)]
+                 .groupby("Destination Port")["Total TEU"].sum()
+                 .sort_values(ascending=False))
+    volume = {"months": volume_months,
+              "ports_3mo": {str(k): float(v) for k, v in ports_3mo.head(5).items()}}
 
-# The extract is a rolling window, so BOTH ends are partial months: it starts
-# mid-July 2025 (322 TEU against 8,430 that September) and ends five days into
-# August 2026. Comparing either against a full month produces a headline that is
-# an artifact of the calendar - the live report shows +1713% YoY for exactly
-# this reason. Compare complete months only.
-_mk = list(mg["ATA Month"])
-_partial = {_mk[0], _mk[-1]}
-_complete = [m for m in _mk if m not in _partial]
-cur_v, prev_v = _complete[-1], _complete[-2]
-yoy = f"{int(cur_v[:4]) - 1}-{cur_v[5:]}"
-note(f"volume comparisons use the last complete month ({cur_v}); "
-     f"{', '.join(sorted(_partial))} are partial window edges and are excluded")
-
-
-def _pct(a, b):
-    return round((a - b) / b * 100, 1) if b else None
+    # The extract is a rolling window, so BOTH ends are partial months: it starts
+    # mid-July 2025 (322 TEU against 8,430 that September) and ends five days into
+    # August 2026. Comparing either against a full month produces a headline that is
+    # an artifact of the calendar - the live report shows +1713% YoY for exactly
+    # this reason. Compare complete months only.
+    _mk = list(mg["ATA Month"])
+    _partial = {_mk[0], _mk[-1]}
+    _complete = [m for m in _mk if m not in _partial]
+    cur_v, prev_v = _complete[-1], _complete[-2]
+    yoy = f"{int(cur_v[:4]) - 1}-{cur_v[5:]}"
+    note(f"volume comparisons use the last complete month ({cur_v}); "
+         f"{', '.join(sorted(_partial))} are partial window edges and are excluded")
 
 
-volume_mom = {"cur": cur_v, "teu_cur": int(monthly_teu[cur_v]), "prev": prev_v,
-              "teu_prev": int(monthly_teu[prev_v]),
-              "delta_pct": _pct(monthly_teu[cur_v], monthly_teu[prev_v])}
-volume_yoy = ({"cur": cur_v, "teu_cur": int(monthly_teu[cur_v]), "prev": yoy,
-               "teu_prev": int(monthly_teu[yoy]),
-               "delta_pct": _pct(monthly_teu[cur_v], monthly_teu[yoy])}
-              if yoy in monthly_teu and yoy not in _partial else None)
-if volume_yoy is None:
-    note(f"year-on-year suppressed: {yoy} is a partial window edge, so the "
-         "comparison would be meaningless")
-note(f"TEU months {_mk[0]} .. {_mk[-1]}; latest month is partial")
+    def _pct(a, b):
+        return round((a - b) / b * 100, 1) if b else None
 
-MSUM_COLS = {"Month": "ATA Month", "Week": "ATA Week",
-             "Destination port": "Destination Port", "Containers": "Total Container",
-             "Orders": "Total Order", "TEU": "Total TEU"}
-raw_monthly_teu = rows(msum[msum["ATA Month"].astype(str).str.match(r"\d{4}-\d{2}")]
-                       .sort_values(["ATA Month", "ATA Week"], ascending=False), MSUM_COLS)
+
+    volume_mom = {"cur": cur_v, "teu_cur": int(monthly_teu[cur_v]), "prev": prev_v,
+                  "teu_prev": int(monthly_teu[prev_v]),
+                  "delta_pct": _pct(monthly_teu[cur_v], monthly_teu[prev_v])}
+    volume_yoy = ({"cur": cur_v, "teu_cur": int(monthly_teu[cur_v]), "prev": yoy,
+                   "teu_prev": int(monthly_teu[yoy]),
+                   "delta_pct": _pct(monthly_teu[cur_v], monthly_teu[yoy])}
+                  if yoy in monthly_teu and yoy not in _partial else None)
+    if volume_yoy is None:
+        note(f"year-on-year suppressed: {yoy} is a partial window edge, so the "
+             "comparison would be meaningless")
+    note(f"TEU months {_mk[0]} .. {_mk[-1]}; latest month is partial")
+
+    MSUM_COLS = {"Month": "ATA Month", "Week": "ATA Week",
+                 "Destination port": "Destination Port", "Containers": "Total Container",
+                 "Orders": "Total Order", "TEU": "Total TEU"}
+    raw_monthly_teu = rows(msum[msum["ATA Month"].astype(str).str.match(r"\d{4}-\d{2}")]
+                           .sort_values(["ATA Month", "ATA Week"], ascending=False), MSUM_COLS)
+else:
+    # No Monthly_Summary export in this refresh. The volume card plots TEU,
+    # containers AND orders per month; the booking-level exports that did arrive
+    # carry no order count, so a substitute would silently redefine one of the
+    # three series. Keep the whole card on its previous figures instead.
+    volume = PREV.get("volume")
+    monthly_teu = PREV.get("trends", {}).get("monthly_teu", {})
+    volume_mom = PREV.get("compare", {}).get("volume_mom")
+    volume_yoy = PREV.get("compare", {}).get("volume_yoy")
+    raw_monthly_teu = PREV.get("raw", {}).get("monthly_teu", [])
+    skipped("Monthly_Summary", "monthly TEU and volume on Trends")
 
 # ------------------------------------------------ destination lead time ----
 print("lead time ...", flush=True)
@@ -868,7 +908,9 @@ D["not_updated"] = [{"section": what, "needs": export,
                      # actually built, not the date of the run that skipped it
                      "asof": _prev_stale.get(what) or PREV.get("perf", {}).get("asof"),
                      "anchor": {"customs held card on Destination": "cu-note",
-                                "ETA reliability bars on In transit": "rel-note"}.get(what)}
+                                "ETA reliability bars on In transit": "rel-note",
+                                "coded cargo-ready reasons on Origin": "cr-note",
+                                "monthly TEU and volume on Trends": "tr-teu"}.get(what)}
                     for export, what in not_updated]
 
 if not HAVE["peta"]:
@@ -938,7 +980,8 @@ if not_updated:
     for _exp, _what in not_updated:
         print(f"  - {_what}  (needs {_exp})")
 
-print(f"  TEU {cur_v} {volume_mom['teu_cur']:,} ({volume_mom['delta_pct']:+}% MoM)"
-      + (f", {volume_yoy['delta_pct']:+}% YoY" if volume_yoy else ", YoY suppressed"))
+if HAVE["msum"]:
+    print(f"  TEU {cur_v} {volume_mom['teu_cur']:,} ({volume_mom['delta_pct']:+}% MoM)"
+          + (f", {volume_yoy['delta_pct']:+}% YoY" if volume_yoy else ", YoY suppressed"))
 print(f"  port->DC median {D_port_median} days   raw.port {len(raw_port):,} rows")
 print(f"\nwrote {out.name}")
