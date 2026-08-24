@@ -25,6 +25,25 @@ delivery performance, customs holds, coded cargo-ready reasons — the client
 report's version is kept and placed alongside the internal detail on the same
 page, rather than shown twice. Everything else keeps its place.
 
+## Raw data tables
+
+Every card that shows a figure has a **View raw data** button under it opening
+the rows behind it. Each of those tables carries:
+
+- **A search box** across every column. Multiple words are AND-ed, so
+  `ningbo vessel` returns rows matching both. The count beside it updates live
+  (`1,468 of 10,989`), and it stacks with the existing per-column dropdowns and
+  column sorting.
+- **An ⤓ Excel button** that downloads exactly what is on screen — search,
+  dropdown filters and sort order all applied — as a real `.xlsx` with a frozen
+  header row and autofilter on. Numeric columns stay numeric so they can be
+  summed in Excel. The file is named `<table>_<as-of date>.xlsx`.
+
+The workbook is written in the page itself (`xlsxBlob` in `index.html`): an
+`.xlsx` is a zip of XML parts, and entries are written STORED, so no compression
+or third-party library is needed. There is still no build step and no external
+request.
+
 Everything is baked into `index.html`: markup, styles and the full dataset as
 an inline `const D = {...}` object. There is no build step, no backend and no
 runtime data fetching. The only external request is the Google Fonts
@@ -116,6 +135,12 @@ drill-down, the stage strip, KPI bars, carrier league, definitions) on top of
 the client file's stylesheet and raw-table widget — both are the better of the
 two. You only need to re-run this if the *set of cards* changes, not for a
 routine data refresh.
+
+> ⚠️ **`mountRaw` now carries repo-local changes.** The raw-table search box and
+> Excel export live in `mountRaw`/`xlsxBlob`, which `assemble.py` lifts from the
+> *client report* file — where those changes do not exist. Re-running step 1
+> against an unmodified client report will silently drop both. Port them across
+> (or re-apply this commit's `index.html` JS) if you ever rebuild the layout.
 
 ### Step 2: `build_client_data.py` — client-sourced pages
 

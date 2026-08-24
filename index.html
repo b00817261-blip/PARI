@@ -480,11 +480,78 @@ function filterCols(rows, cols){
   });
   return out;
 }
+// ---- .xlsx writer -----------------------------------------------------------
+// The page has no build step and makes no external requests, so it cannot pull
+// in SheetJS. An .xlsx is a zip of XML parts; entries are STORED (method 0), so
+// no deflate implementation is needed and the file is still a valid workbook
+// Excel, Numbers and LibreOffice open natively.
+const CRCT=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0;}return t;})();
+function crc32(b){let c=0xFFFFFFFF;for(let i=0;i<b.length;i++)c=CRCT[(c^b[i])&0xFF]^(c>>>8);return (c^0xFFFFFFFF)>>>0;}
+const UTF8=new TextEncoder();
+function xmlEsc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g,'');}
+function colRef(n){let s='';n++;while(n>0){const m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=(n-m-1)/26;}return s;}
+function zipStore(files){
+  const enc=[],cen=[];let off=0;
+  const dt=new Date(),tm=((dt.getHours()<<11)|(dt.getMinutes()<<5)|(dt.getSeconds()/2))&0xFFFF,
+        dd=(((dt.getFullYear()-1980)<<9)|((dt.getMonth()+1)<<5)|dt.getDate())&0xFFFF;
+  const u16=v=>[v&0xFF,(v>>8)&0xFF], u32=v=>[v&0xFF,(v>>8)&0xFF,(v>>16)&0xFF,(v>>24)&0xFF];
+  files.forEach(f=>{
+    const name=UTF8.encode(f.name),data=UTF8.encode(f.data),c=crc32(data);
+    const lh=[...u32(0x04034b50),...u16(20),...u16(0),...u16(0),...u16(tm),...u16(dd),
+              ...u32(c),...u32(data.length),...u32(data.length),...u16(name.length),...u16(0)];
+    enc.push(new Uint8Array(lh),name,data);
+    cen.push([...u32(0x02014b50),...u16(20),...u16(20),...u16(0),...u16(0),...u16(tm),...u16(dd),
+              ...u32(c),...u32(data.length),...u32(data.length),...u16(name.length),
+              ...u16(0),...u16(0),...u16(0),...u16(0),...u32(0),...u32(off),...name]);
+    off+=lh.length+name.length+data.length;
+  });
+  const cd=[].concat(...cen),
+        eo=[...u32(0x06054b50),...u16(0),...u16(0),...u16(files.length),...u16(files.length),
+            ...u32(cd.length),...u32(off),...u16(0)];
+  const parts=[...enc,new Uint8Array(cd),new Uint8Array(eo)];
+  let tot=0;parts.forEach(p=>tot+=p.length);
+  const out=new Uint8Array(tot);let p=0;parts.forEach(a=>{out.set(a,p);p+=a.length;});
+  return out;
+}
+function xlsxBlob(cols,rows,sheetName){
+  const sheet=(sheetName||'Data').replace(/[\\\/\?\*\[\]:]/g,' ').slice(0,31)||'Data';
+  const head='<row r="1">'+cols.map((c,i)=>
+    '<c r="'+colRef(i)+'1" t="inlineStr" s="1"><is><t>'+xmlEsc(c)+'</t></is></c>').join('')+'</row>';
+  const body=rows.map((r,ri)=>{
+    const n=ri+2;
+    return '<row r="'+n+'">'+cols.map((c,i)=>{
+      let v=r[c];
+      if(v===null||v===undefined||v==='nan'||v==='—'||v==='') return '';
+      // keep numbers numeric so Excel can sum and sort them
+      const num=(typeof v==='number')||(/^-?\d+(\.\d+)?$/.test(String(v).trim())&&String(v).trim()!=='');
+      const ref=colRef(i)+n;
+      return num ? '<c r="'+ref+'"><v>'+String(v).trim()+'</v></c>'
+                 : '<c r="'+ref+'" t="inlineStr"><is><t>'+xmlEsc(v)+'</t></is></c>';
+    }).join('')+'</row>';
+  }).join('');
+  const files=[
+    {name:'[Content_Types].xml',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'},
+    {name:'_rels/.rels',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'},
+    {name:'xl/workbook.xml',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="'+xmlEsc(sheet)+'" sheetId="1" r:id="rId1"/></sheets></workbook>'},
+    {name:'xl/_rels/workbook.xml.rels',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'},
+    {name:'xl/styles.xml',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles><dxfs count="0"/></styleSheet>'},
+    {name:'xl/worksheets/sheet1.xml',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr><outlinePr summaryBelow="1" summaryRight="1"/></sheetPr><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData>'+head+body+'</sheetData><autoFilter ref="A1:'+colRef(cols.length-1)+(rows.length+1)+'"/></worksheet>'}
+  ];
+  return new Blob([zipStore(files)],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+function downloadRows(cols,rows,name){
+  const a=document.createElement('a'),url=URL.createObjectURL(xlsxBlob(cols,rows,name));
+  a.href=url; a.download=name.replace(/[^\w.-]+/g,'_')+'.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+}
+
 function mountRaw(panel, rows, srcKey){
   if(!rows || !rows.length){ panel.innerHTML='<div class="note" style="padding:10px">No rows.</div>'; return; }
   const cols=Object.keys(rows[0]);
   const fcols=filterCols(rows, cols);
-  const state={sortCol:null, dir:'asc', filters:{}};
+  const state={sortCol:null, dir:'asc', filters:{}, q:''};
+  let shown=rows;   // rows currently passing search + dropdown filters, in sort order
   const src = RAWSRC[srcKey] ? '<div style="font-size:10.5px;color:var(--ink-3);padding:6px 8px;border-bottom:1px solid var(--line-2);font-family:\'IBM Plex Mono\',monospace" data-src>source: '+RAWSRC[srcKey]+' · smartMOOV BI · '+rows.length.toLocaleString('en-GB')+' rows</div>' : '';
   // filter bar
   let fbar='';
@@ -495,11 +562,32 @@ function mountRaw(panel, rows, srcKey){
         ' <select data-fc="'+c+'" style="font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--line);border-radius:3px"><option value="">all</option>'+
         vals.map(v=>'<option value="'+String(v).replace(/"/g,'&quot;')+'">'+v+'</option>').join('')+'</select></label>').join('')+'</div>';
   }
-  panel.innerHTML=src+fbar+'<div data-tblwrap></div>';
+  // search across every column, and an Excel export of whatever is on screen
+  const tbar='<div style="display:flex;gap:8px;align-items:center;padding:8px;border-bottom:1px solid var(--line-2)">'+
+    '<input data-q type="search" placeholder="Search all columns\u2026" '+
+    'style="flex:1;min-width:110px;font-family:\'IBM Plex Mono\',monospace;font-size:11.5px;'+
+    'padding:5px 8px;border:1px solid var(--line);border-radius:5px;background:var(--card);color:var(--ink)">'+
+    '<span data-qn style="font-size:11px;color:var(--ink-3);white-space:nowrap;'+
+    'font-family:\'IBM Plex Mono\',monospace"></span>'+
+    '<button class="rawbtn" data-dl title="Download what is shown, as .xlsx" '+
+    'style="margin-top:0;padding:5px 10px;font-size:11.5px;white-space:nowrap">\u2913 Excel</button></div>';
+  panel.innerHTML=src+tbar+fbar+'<div data-tblwrap></div>';
   const wrap=panel.querySelector('[data-tblwrap]');
   function draw(){
     let rs=rows.filter(r=>Object.entries(state.filters).every(([c,val])=>!val||String(r[c])===val));
+    if(state.q){
+      const terms=state.q.toLowerCase().split(/\s+/).filter(Boolean);
+      // every term must appear somewhere in the row, so words can be combined
+      rs=rs.filter(r=>{
+        const hay=cols.map(c=>r[c]===null||r[c]===undefined?'':String(r[c])).join(' ').toLowerCase();
+        return terms.every(t=>hay.includes(t));
+      });
+    }
     if(state.sortCol!==null){ const c=state.sortCol; rs=[...rs].sort((a,b)=>cmp(a[c],b[c],state.dir)); }
+    shown=rs;
+    const qn=panel.querySelector('[data-qn]');
+    if(qn) qn.textContent = rs.length===rows.length ? rows.length.toLocaleString('en-GB')+' rows'
+            : rs.length.toLocaleString('en-GB')+' of '+rows.length.toLocaleString('en-GB');
     const arrow=c=> state.sortCol===c ? (state.dir==='asc'?' ▲':' ▼') : ' ⇅';
     wrap.innerHTML='<table><thead><tr>'+cols.map(c=>
         '<th data-sc="'+c+'" style="cursor:pointer;user-select:none;white-space:nowrap">'+c+'<span style="color:var(--ink-3);font-size:9px">'+arrow(c)+'</span></th>').join('')+'</tr></thead><tbody>'+
@@ -516,6 +604,13 @@ function mountRaw(panel, rows, srcKey){
     });
   }
   panel.querySelectorAll('select[data-fc]').forEach(sel=>sel.onchange=()=>{ state.filters[sel.dataset.fc]=sel.value; draw(); });
+  const qbox=panel.querySelector('[data-q]');
+  if(qbox) qbox.oninput=()=>{ state.q=qbox.value.trim(); draw(); };
+  const dl=panel.querySelector('[data-dl]');
+  if(dl) dl.onclick=()=>{
+    // exports exactly what the search and filters have left on screen
+    downloadRows(cols, shown, (srcKey||'raw')+'_'+(D.perf&&D.perf.asof?D.perf.asof:'export'));
+  };
   draw();
 }
 function bindRaw(){
